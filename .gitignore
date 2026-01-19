@@ -1,0 +1,19 @@
+# Python system files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyCharm settings
+.idea/
+
+# Project Data Folders (Generated content, huge files)
+data/
+
+# Virtual Environment (if exists)
+venv/
+env/
+.env
+
+# OS specific
+.DS_Store
+Thumbs.db
