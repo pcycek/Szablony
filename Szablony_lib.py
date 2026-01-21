@@ -741,17 +741,20 @@ class Szablony:
         wynik = Szablony()
         wynik.nowy_projekt("Suma", s1 + int(s2 * skala), h1)
         wynik.sloty = sl1
+        
         # ODBUDOWA CACHE OBRAZÓW
         for i, s in enumerate(wynik.sloty):
             s["_cached_img"] = None
             s["_cached_imgs"] = None
 
-        if "kolaz" in s:
-            wynik._odbuduj_cache_slotu(i)
-        elif s.get("image_path"):
-            wynik.wstaw_obrazek(i, s["image_path"])
-            wynik.render_all()
-            return wynik
+            if "kolaz" in s:
+                wynik._odbuduj_cache_slotu(i)
+            elif s.get("image_path"):
+                # wstaw_obrazek ładuje obraz i robi render (trochę wolne, ale bezpieczne)
+                wynik.wstaw_obrazek(i, s["image_path"])
+
+        wynik.render_all()
+        return wynik
 
     def __truediv__(self, other):
         """Łączy projekty pionowo."""
@@ -774,6 +777,7 @@ class Szablony:
         wynik = Szablony()
         wynik.nowy_projekt("Dzielenie", s1, h1 + int(h2 * skala))
         wynik.sloty = sl1
+        
         # ODBUDOWA CACHE OBRAZÓW
         for i, s in enumerate(wynik.sloty):
             s["_cached_img"] = None
@@ -783,6 +787,7 @@ class Szablony:
                 wynik._odbuduj_cache_slotu(i)
             elif s.get("image_path"):
                 wynik.wstaw_obrazek(i, s["image_path"])
+        
         wynik.render_all()
         return wynik
 
