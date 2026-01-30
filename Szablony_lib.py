@@ -289,26 +289,53 @@ class Szablony:
         w = c[2] - c[0]
         h = c[3] - c[1]
         
-        max_w = w * 0.95
-        max_h = h * 0.95
+        # Marginesy (bezpieczeństwo) - startowo 10px przy skali 1.0
+        base_margin = int(10 * skala)
+        
+        # Dla małych slotów zmniejszamy margines, żeby tekst nie zniknął
+        # Margines nie może być większy niż 15% wymiaru (łącznie 30% na oba marginesy)
+        margin_x = min(base_margin, int(w * 0.15))
+        margin_y = min(base_margin, int(h * 0.15))
+        
+        # Maksymalny obszar na tekst
+        max_w = w - (2 * margin_x)
+        max_h = h - (2 * margin_y)
+        
+        # Jeśli box jest mikroskopijny, nie rysujemy (ale teraz próg jest niższy)
+        if max_w < 1 or max_h < 1:
+            return
 
         font = ImageFont.load_default()
         
         # Zakres szukania czcionki zależny od skali (dla 300DPI > 1.0 potrzebujemy większych fontów)
         start_size = int(100 * skala if skala >= 1 else 100)
-        # Przy dużym druku (skala 4) start_size = 400
+        
+        found_font = False
+        smallest_font = None # Fallback
         
         try:
-            for size in range(start_size, 5, -2):
+            # Pętla szukania pasującego rozmiaru
+            for size in range(start_size, 4, -2):
                 f = ImageFont.truetype("arial.ttf", size)
+                smallest_font = f
+                
                 bb = self.draw.textbbox((0, 0), txt, font=f)
                 bw = bb[2] - bb[0]
                 bh = bb[3] - bb[1]
                 
+                # Sprawdzenie czy się mieści z lekkim zapasem (np. 95% max_w)
                 if bw <= max_w and bh <= max_h:
                     font = f
+                    found_font = True
                     break
+            
+            # Jeśli nie znaleziono pasującego (tekst za długi nawet dla size=6),
+            # używamy najmniejszej czcionki z pętli zamiast defaultowej (która może być duża)
+            if not found_font and smallest_font:
+                font = smallest_font
+                
         except:
+            # Jeśli arial nie działa, zostaje load_default()
             pass
             
         # Ustalanie pozycji (Anchor)
@@ -320,13 +347,11 @@ class Szablony:
         text_y = cy
         pil_anchor = "mm" # middle-middle domyślnie
         
-        margin_px = int(10 * skala)
-        
         if align == "left":
-            text_x = c[0] + margin_px
+            text_x = c[0] + margin_x
             pil_anchor = "lm" # left-middle
         elif align == "right":
-            text_x = c[2] - margin_px
+            text_x = c[2] - margin_x
             pil_anchor = "rm" # right-middle
             
         self.draw.text(
