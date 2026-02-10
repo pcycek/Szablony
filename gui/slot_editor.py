@@ -100,7 +100,7 @@ class SlotEditorWindow(tk.Toplevel):
         # Tworzymy dedykowane okno dialogowe
         top = tk.Toplevel(self)
         top.title("Konfiguracja tekstu")
-        top.geometry("400x350")
+        top.geometry("450x550")
         
         container = ttk.Frame(top, padding=10)
         container.pack(fill="both", expand=True)
@@ -110,6 +110,8 @@ class SlotEditorWindow(tk.Toplevel):
         # --- Frames ---
         f_manual = ttk.LabelFrame(container, text="Tekst Ręczny", padding=10)
         f_file = ttk.LabelFrame(container, text="Tekst z Pliku", padding=10)
+        f_random = ttk.LabelFrame(container, text="Losowa Liczba (Zakres)", padding=10)
+        f_dep = ttk.LabelFrame(container, text="Zależna Liczba", padding=10)
 
         # --- MANUAL UI ---
         ttk.Label(f_manual, text="Treść:").pack(anchor="w")
@@ -133,6 +135,39 @@ class SlotEditorWindow(tk.Toplevel):
         e_idx = ttk.Entry(row_opts, width=5)
         e_idx.pack(side="left", padx=5)
         e_idx.insert(0, "0")
+        
+        # --- RANDOM UI ---
+        ttk.Label(f_random, text="Zakres (min-max):").pack(anchor="w")
+        e_range = ttk.Entry(f_random)
+        e_range.pack(fill="x", pady=5)
+        e_range.insert(0, "1-100")
+        
+        # --- DEPENDENT UI ---
+        ttk.Label(f_dep, text="Slot źródłowy (Index):").pack(anchor="w")
+        e_src_idx = ttk.Entry(f_dep)
+        e_src_idx.pack(fill="x", pady=2)
+        e_src_idx.insert(0, "0")
+        
+        ttk.Label(f_dep, text="Relacja:").pack(anchor="w", pady=(5,0))
+        rel_var = tk.StringVar(value="smaller")
+        
+        
+        def update_limit_label():
+            if rel_var.get() == "smaller":
+                l_limit.config(text="Dolna granica (domyślnie 0):")
+            else:
+                l_limit.config(text="Górna granica (wymagana):")
+                
+        ttk.Radiobutton(f_dep, text="Mniejsza od źródła", variable=rel_var, value="smaller", command=update_limit_label).pack(anchor="w")
+        ttk.Radiobutton(f_dep, text="Większa od źródła", variable=rel_var, value="larger", command=update_limit_label).pack(anchor="w")
+        
+        l_limit = ttk.Label(f_dep, text="Limit:")
+        l_limit.pack(anchor="w", pady=(5,0))
+        e_limit = ttk.Entry(f_dep)
+        e_limit.pack(fill="x", pady=2)
+        e_limit.insert(0, "0")
+
+        update_limit_label()
 
         # --- ALIGNMENT ---
         f_align = ttk.LabelFrame(container, text="Wyrównanie", padding=10)
@@ -147,15 +182,24 @@ class SlotEditorWindow(tk.Toplevel):
         # --- LOGIKA PRZEŁĄCZANIA ---
         def update_visibility():
             mode = mode_var.get()
+            f_manual.pack_forget()
+            f_file.pack_forget()
+            f_random.pack_forget()
+            f_dep.pack_forget()
+            
             if mode == "manual":
                 f_manual.pack(fill="x", pady=5)
-                f_file.pack_forget()
-            else:
-                f_manual.pack_forget()
+            elif mode == "file":
                 f_file.pack(fill="x", pady=5)
+            elif mode == "random":
+                f_random.pack(fill="x", pady=5)
+            elif mode == "random_dependent":
+                f_dep.pack(fill="x", pady=5)
 
         ttk.Radiobutton(container, text="Wpisz ręcznie", variable=mode_var, value="manual", command=update_visibility).pack(anchor="w")
         ttk.Radiobutton(container, text="Wczytaj z pliku", variable=mode_var, value="file", command=update_visibility).pack(anchor="w")
+        ttk.Radiobutton(container, text="Losowa liczba", variable=mode_var, value="random", command=update_visibility).pack(anchor="w")
+        ttk.Radiobutton(container, text="Zależna liczba", variable=mode_var, value="random_dependent", command=update_visibility).pack(anchor="w")
 
         # --- ŁADOWANIE DANYCH ---
         curr = self.sz.sloty[self.indeks].get("tekst")
@@ -166,18 +210,33 @@ class SlotEditorWindow(tk.Toplevel):
             initial_align = curr.get("align", "center")
         align_var.set(initial_align)
         
-        if isinstance(curr, dict) and curr.get("typ") == "file":
-            mode_var.set("file")
-            e_file.insert(0, curr.get("file", ""))
-            e_sep.delete(0, "end"); e_sep.insert(0, curr.get("separator", ","))
-            e_idx.delete(0, "end"); e_idx.insert(0, str(curr.get("index", 0)))
+        if isinstance(curr, dict):
+            typ = curr.get("typ", "manual")
+            if typ == "file":
+                mode_var.set("file")
+                e_file.insert(0, curr.get("file", ""))
+                e_sep.delete(0, "end"); e_sep.insert(0, curr.get("separator", ","))
+                e_idx.delete(0, "end"); e_idx.insert(0, str(curr.get("index", 0)))
+            elif typ == "random":
+                mode_var.set("random")
+                e_range.delete(0, "end")
+                e_range.insert(0, curr.get("range", "1-100"))
+            elif typ == "random_dependent":
+                mode_var.set("random_dependent")
+                e_src_idx.delete(0, "end"); e_src_idx.insert(0, str(curr.get("source", 0)))
+                rel_var.set(curr.get("relation", "smaller"))
+                e_limit.delete(0, "end"); e_limit.insert(0, str(curr.get("limit", 0)))
+                update_limit_label()
+            else:
+                mode_var.set("manual")
+                e_manual.delete(0, "end")
+                e_manual.insert(0, curr.get("value", ""))
         else:
             mode_var.set("manual")
             val = ""
             if isinstance(curr, str):
                 val = curr
-            elif isinstance(curr, dict) and curr.get("typ") == "manual":
-                val = curr.get("value", "")
+            e_manual.delete(0, "end")
             e_manual.insert(0, val)
             
         update_visibility()
@@ -185,15 +244,15 @@ class SlotEditorWindow(tk.Toplevel):
         # --- ZATWIERDZANIE ---
         def on_save():
             chosen_align = align_var.get()
+            mode = mode_var.get()
             
-            if mode_var.get() == "manual":
-                # Zapisujemy w formacie JSON (zgodnie z życzeniem)
+            if mode == "manual":
                 self.sz.edytuj_slot(self.indeks, tekst={
                     "typ": "manual",
                     "value": e_manual.get(),
                     "align": chosen_align
                 })
-            else:
+            elif mode == "file":
                 try:
                     idx = int(e_idx.get())
                 except:
@@ -205,6 +264,21 @@ class SlotEditorWindow(tk.Toplevel):
                     index=idx,
                     align=chosen_align
                 )
+            elif mode == "random":
+                self.sz.edytuj_slot(self.indeks, tekst={
+                    "typ": "random",
+                    "range": e_range.get(),
+                    "align": chosen_align
+                })
+            elif mode == "random_dependent":
+                self.sz.edytuj_slot(self.indeks, tekst={
+                    "typ": "random_dependent",
+                    "source": int(e_src_idx.get()),
+                    "relation": rel_var.get(),
+                    "limit": int(e_limit.get()),
+                    "align": chosen_align
+                })
+                
             self.parent.render()
             top.destroy()
 
@@ -301,15 +375,23 @@ class SlotEditorWindow(tk.Toplevel):
             title="Kolaż",
             fields=[
                 ("Plik", "str"),
-                ("Ilość (0 = random)", "int"),
-                ("Min (dla random)", "int"),
-                ("Max (dla random)", "int"),
+                ("Ilość (0 = random/slot)", "int", 1),
+                ("Min (dla random)", "int", 1),
+                ("Max (dla random)", "int", 1),
+                ("Slot źródłowy (Index lub -1)", "int", -1)
             ]
         )
-        def logic(pw, sciezka, ilosc, min_n, max_n):
-    
-            if ilosc == 0:
-                # --- RANDOM ---
+        def logic(pw, sciezka, ilosc, min_n, max_n, src_slot):
+            
+            # 1. Priorytet: Slot źródłowy
+            if src_slot >= 0:
+                self.sz.wklej_jeden_obraz_na_kolaz(
+                    indeks=self.indeks,
+                    sciezka=sciezka,
+                    source_slot=src_slot
+                )
+            # 2. Random
+            elif ilosc == 0:
                 if min_n <= 0 or max_n <= 0 or min_n > max_n:
                     from tkinter import messagebox
                     messagebox.showerror(
@@ -326,8 +408,8 @@ class SlotEditorWindow(tk.Toplevel):
                         "max": max_n
                     }
                 )
+            # 3. Stała ilość
             else:
-                # --- STAŁA ILOŚĆ ---
                 self.sz.wklej_jeden_obraz_na_kolaz(
                     indeks=self.indeks,
                     sciezka=sciezka,

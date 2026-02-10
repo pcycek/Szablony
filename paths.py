@@ -8,9 +8,10 @@ OBRAZY_DIR = DATA_DIR / "obrazy"
 WYNIKI_DIR = DATA_DIR / "wyniki"
 TEKSTY_DIR = DATA_DIR / "tekst"
 DO_DRUKU_DIR = DATA_DIR / "do_druku"
+SKRYPTY_DIR = DATA_DIR / "skrypty"
 
 # Tworzenie folderów
-for d in [PROJEKTY_DIR, OBRAZY_DIR, WYNIKI_DIR, TEKSTY_DIR, DO_DRUKU_DIR]:
+for d in [PROJEKTY_DIR, OBRAZY_DIR, WYNIKI_DIR, TEKSTY_DIR, DO_DRUKU_DIR, SKRYPTY_DIR]:
     d.mkdir(parents=True, exist_ok=True)
 
 def napraw_sciezke(nazwa, typ="json"):

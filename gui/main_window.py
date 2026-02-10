@@ -38,6 +38,7 @@ class MainWindow(tk.Tk):
         ttk.Button(panel, text="Renderuj wszystkie (Batch)", command=self.batch_render).pack(fill="x", pady=2)
         ttk.Button(panel, text="Renderuj do druku (Wybierz)", command=self.renderuj_do_druku_click).pack(fill="x", pady=2)
         ttk.Button(panel, text="Otwórz folder...", command=self.otworz_folder_click).pack(fill="x", pady=2)
+        ttk.Button(panel, text="Uruchom skrypt", command=self.uruchom_skrypt_click).pack(fill="x", pady=2)
         
         ttk.Separator(panel).pack(fill="x", pady=10)
         
@@ -261,6 +262,26 @@ class MainWindow(tk.Tk):
             btn.pack(fill="x", padx=20, pady=5)
             
         ttk.Button(top, text="Anuluj", command=top.destroy).pack(pady=10)
+
+    def uruchom_skrypt_click(self):
+        """Uruchamia wybrany skrypt Pythona w nowym procesie."""
+        from tkinter import filedialog
+        from paths import SKRYPTY_DIR
+        import subprocess
+        import sys
+
+        filename = filedialog.askopenfilename(
+            initialdir=SKRYPTY_DIR,
+            title="Wybierz skrypt do uruchomienia",
+            filetypes=[("Pliki Python", "*.py"), ("Wszystkie pliki", "*.*")]
+        )
+
+        if filename:
+            try:
+                # Uruchamiamy w nowym procesie, używając tego samego interpretera
+                subprocess.Popen([sys.executable, filename])
+            except Exception as e:
+                messagebox.showerror("Błąd", f"Nie udało się uruchomić skryptu:\n{e}")
 
     # --- OBSŁUGA SLOTÓW ---
 

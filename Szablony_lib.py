@@ -35,6 +35,11 @@ class Szablony:
         # Cache obrazów: sciezka -> (Image, mtime)
         self.cache_obrazow = {}
         
+        # Cache renderowania (RAM only) - Tu trzymamy WSZYSTKO co potrzebne do rysowania
+        # Klucz: index slotu (int)
+        # Wartość: dict { "text": str, "collage": list, "value": int, ... }
+        self._render_cache = {}
+        
         # listy fo zspisu undo/redo
         self._undo_stack = []
         self._redo_stack = []
@@ -54,6 +59,8 @@ class Szablony:
         self.wysokosc = wysokosc
         self.kolor_tla = kolor_tla
         self.sloty = []
+        
+        self.prepare_render_data(force=True)
         self.render_all()
 
     def otworz_projekt(self, nazwa_pliku):
@@ -71,20 +78,9 @@ class Szablony:
         self.wysokosc = dane["wysokosc"]
         self.sloty = dane["sloty"]
 
-        # Odbudowa CACHE dla każdego slotu
-        for i, s in enumerate(self.sloty):
-            # 1. Reset starych obiektów Pillow (nie da się ich zapisać w JSON)
-            s["_cached_img"] = None
-            s["_cached_imgs"] = None
-
-            # 2. Jeśli to był KOLAŻ - wywołaj odbudowę kolażu
-            if "kolaz" in s:
-                self._odbuduj_cache_slotu(i)
-            
-            # 3. Jeśli to był POJEDYNCZY OBRAZ (ważne!)
-            elif s.get("image_path"):
-                self.wstaw_obrazek(i, s["image_path"])
-
+        # Odbudowa CACHE obrazów (fizyczne pliki) - to zostaje w self (global cache)
+        # Ale cache renderowania (_render_cache) budujemy od zera
+        self.prepare_render_data(force=True)
         self.render_all()
         return True
 
@@ -96,40 +92,251 @@ class Szablony:
         from paths import napraw_sciezke
 
         pelna_sciezka = napraw_sciezke(sciezka, "img")
-       # pelna_sciezka = OBRAZY_DIR / sciezka
         
-        # Używamy os.path.getmtime - to najbezpieczniejsza metoda w Pythonie
         try:
             mtime = os.path.getmtime(pelna_sciezka)
         except Exception:
-            mtime = 0 # Jeśli plik nie istnieje, ustawiamy czas na 0
+            mtime = 0 
 
         if sciezka in self.cache_obrazow:
             img, zapisany_mtime = self.cache_obrazow[sciezka]
             if zapisany_mtime == mtime:
                 return img
 
-        # Jeśli nie ma w cache lub mtime się nie zgadza:
         try:
             img = Image.open(pelna_sciezka).convert("RGB")
             self.cache_obrazow[sciezka] = (img, mtime)
             return img
         except Exception as e:
             print(f"Nie udało się załadować obrazu: {e}")
-            # Zwróć pusty różowy obrazek, żeby było widać, że brakuje pliku
             return Image.new("RGB", (100, 100), "pink")
 
-
-#    def wyczysc_cache(self):
-#        """Czyści cache obrazów."""
-#        self.cache_obrazow.clear()
-
     # =====================================================
-    # RENDER
+    # RENDER ENGINE
     # =====================================================
+    
+    def prepare_render_data(self, force=False):
+        """
+        Przygotowuje WSZYSTKIE dane do renderowania.
+        1. Rozwiązuje zależności liczbowe (random/dependent).
+        2. Przygotowuje teksty.
+        3. Przygotowuje układy kolaży (liczy pozycje obrazków).
+        """
+        if force:
+            self._render_cache = {}
+            
+        # 1. Rozwiązywanie zależności liczbowych (iteracyjnie)
+        max_iter = len(self.sloty) + 2
+        iteracja = 0
+        zmieniono = True
+        
+        # Wewnętrzny helper do pobrania wartości z cache
+        def get_val(idx):
+            if idx in self._render_cache and "value" in self._render_cache[idx]:
+                return self._render_cache[idx]["value"]
+            return None
+
+        while zmieniono and iteracja < max_iter:
+            zmieniono = False
+            iteracja += 1
+            
+            for i, s in enumerate(self.sloty):
+                # Jeśli mamy już wartość w cache, to pomijamy
+                if get_val(i) is not None:
+                    continue
+                    
+                tekst_dane = s.get("tekst")
+                if not tekst_dane:
+                    continue
+                
+                typ = "manual"
+                if isinstance(tekst_dane, dict):
+                    typ = tekst_dane.get("typ", "manual")
+                
+                nowa_wartosc = None
+                
+                if typ == "manual":
+                    val_str = tekst_dane.get("value", "") if isinstance(tekst_dane, dict) else tekst_dane
+                    try:
+                        nowa_wartosc = int(val_str)
+                    except:
+                        pass
+                        
+                elif typ == "random":
+                    range_str = tekst_dane.get("range", "1-100")
+                    try:
+                        parts = range_str.split("-")
+                        if len(parts) == 2:
+                            min_v = int(parts[0].strip())
+                            max_v = int(parts[1].strip())
+                            if min_v > max_v: min_v, max_v = max_v, min_v
+                            nowa_wartosc = random.randint(min_v, max_v)
+                    except:
+                        pass
+                
+                elif typ == "random_dependent":
+                    src_idx = int(tekst_dane.get("source", -1))
+                    src_val = get_val(src_idx)
+                    
+                    if src_val is not None:
+                        rel = tekst_dane.get("relation", "smaller")
+                        limit = int(tekst_dane.get("limit", 0))
+                        try:
+                            if rel == "smaller":
+                                gorna = src_val
+                                dolna = limit
+                                if dolna > gorna: dolna = gorna 
+                                nowa_wartosc = random.randint(dolna, gorna)
+                            elif rel == "larger":
+                                dolna = src_val
+                                gorna = limit
+                                if dolna > gorna: gorna = dolna
+                                nowa_wartosc = random.randint(dolna, gorna)
+                        except:
+                            pass
+                
+                if nowa_wartosc is not None:
+                    if i not in self._render_cache: self._render_cache[i] = {}
+                    self._render_cache[i]["value"] = nowa_wartosc
+                    zmieniono = True
+
+        # 2. Generowanie danych dla KAŻDEGO slotu (Tekst, Kolaż)
+        for i, s in enumerate(self.sloty):
+            # Wykrywanie zmian geometrii
+            should_recalc_layout = False
+            current_coords = tuple(s["coords"])
+            
+            if i not in self._render_cache:
+                self._render_cache[i] = {}
+                should_recalc_layout = True
+            else:
+                # Sprawdź czy geometria się zmieniła (dla kolaży to ważne)
+                last_coords = self._render_cache[i].get("last_coords")
+                if last_coords != current_coords:
+                    should_recalc_layout = True
+            
+            cache_slot = self._render_cache[i]
+            cache_slot["last_coords"] = current_coords
+            
+            # --- TEKST ---
+            if s.get("tekst"):
+                val_text = ""
+                # Czy to liczba z dependency?
+                if "value" in cache_slot:
+                    val_text = str(cache_slot["value"])
+                else:
+                    # Inne typy tekstów (file, manual string)
+                    dane = s["tekst"]
+                    if isinstance(dane, str):
+                        val_text = dane
+                    elif isinstance(dane, dict):
+                        t = dane.get("typ", "manual")
+                        if t == "random_dependent":
+                            val_text = "[...]" 
+                        elif t == "manual":
+                             val_text = dane.get("value", "")
+                        elif t == "file":
+                            fpath = self._resolve_image_path(dane.get("file", "")).with_suffix(".txt")
+                            try:
+                                with open(fpath, "r", encoding="utf-8") as f:
+                                    raw = f.read()
+                                idx = int(dane.get("index", 0))
+                                parts = raw.split(dane.get("separator", ","))
+                                if idx < len(parts):
+                                    val_text = parts[idx].strip()
+                                else:
+                                    val_text = ""
+                            except:
+                                val_text = "[ERR]"
+                
+                cache_slot["final_text"] = val_text
+            
+            # --- KOLAŻ ---
+            # Przeliczamy tylko gdy trzeba (nowy slot lub zmiana geometrii, lub brak danych)
+            if s.get("kolaz") and (should_recalc_layout or "collage_items" not in cache_slot):
+                k = s["kolaz"]
+                # 1. Ilość
+                n = 1
+                if k.get("source_slot") is not None:
+                    src = k["source_slot"]
+                    if get_val(src) is not None:
+                        n = get_val(src)
+                elif k.get("random"):
+                    if "collage_n" in cache_slot:
+                         n = cache_slot["collage_n"]
+                    else:
+                         n = random.randint(k.get("min", 1), k.get("max", 1))
+                         cache_slot["collage_n"] = n
+                else:
+                    n = k.get("ilosc", 1)
+                
+                # 2. Layout (Grid)
+                layout_items = []
+                if n > 0:
+                    c = s["coords"]
+                    slot_w = c[2] - c[0]
+                    slot_h = c[3] - c[1]
+                    
+                    if slot_w > 0 and slot_h > 0:
+                        ratio = slot_w / slot_h
+                        cols = max(1, int((n * ratio) ** 0.5))
+                        rows = (n + cols - 1) // cols
+                        rows = max(1, rows)
+                        
+                        cell_w = max(1, slot_w // cols)
+                        cell_h = max(1, slot_h // rows)
+                        
+                        margines_proc = k.get("margines_proc", 10)
+                        margin_x = int(cell_w * margines_proc / 100)
+                        margin_y = int(cell_h * margines_proc / 100)
+                        
+                        max_w = max(1, cell_w - margin_x)
+                        max_h = max(1, cell_h - margin_y)
+                        
+                        base_path = k.get("sciezka")
+                        
+                        for idx in range(n):
+                            r = idx // cols
+                            c_idx = idx % cols
+                            
+                            # Obliczamy relatywne pozycje środka komórki w slocie
+                            # Żeby potem przy renderze (i skalowaniu) to odtworzyć
+                            # Ale uwaga: render potrzebuje Absolutnych pozycji dla danej skali.
+                            # Najłatwiej zapisać pozycje znormalizowane (0.0-1.0) lub relatywne do slotu.
+                            # Zapiszmy relatywne współrzędne w pikselach dla skali 1.0 (bazowej).
+                            
+                            cell_x = c_idx * cell_w
+                            cell_y = r * cell_h
+                            
+                            # Wyliczamy offset wewnątrz komórki (centrowanie)
+                            # Tutaj musimy znać proporcje obrazka, żeby go wycentrować.
+                            # To wymaga załadowania obrazka w prepare? TAK.
+                            img_obj = self._zaladuj_obraz_z_cache(base_path)
+                            iw, ih = img_obj.size
+                            
+                            # Skalowanie "contain" wewnątrz max_w/max_h
+                            scale_factor = min(max_w / iw, max_h / ih)
+                            fw = int(iw * scale_factor)
+                            fh = int(ih * scale_factor)
+                            
+                            final_x = cell_x + (cell_w - fw) // 2
+                            final_y = cell_y + (cell_h - fh) // 2
+                            
+                            layout_items.append({
+                                "path": base_path,
+                                "rel_x": final_x, # Względem lewego górnego rogu slotu
+                                "rel_y": final_y,
+                                "w": fw,
+                                "h": fh
+                            })
+
+                cache_slot["collage_items"] = layout_items
 
     def render_all(self, skala=1.0):
-        """Renderuje cały obraz projektu. Skala > 1.0 służy do druku."""
+        """Renderuje (TYLKO rysuje) na podstawie _render_cache."""
+        
+        # Upewnij się, że mamy dane (uzupełnia braki, ale nie przelicza istniejących)
+        self.prepare_render_data(force=False)
         
         w = int(self.szerokosc * skala)
         h = int(self.wysokosc * skala)
@@ -142,73 +349,57 @@ class Szablony:
 
     def _renderuj_pojedynczy_slot(self, i, skala=1.0):
         s = self.sloty[i]
-        base_c = s["coords"]
+        c_base = s["coords"]
         
         # Przeliczanie współrzędnych wg skali
-        c = [int(val * skala) for val in base_c]
+        c = [int(val * skala) for val in c_base]
         
         slot_w = c[2] - c[0]
         slot_h = c[3] - c[1]
+
+        # 0. Dane z cache
+        cache = self._render_cache.get(i, {})
 
         # 1. Tło slotu
         if s.get("fill"):
             self.draw.rectangle(c, fill=s["fill"])
 
-        # 2. Obraz
-        # Jeśli skala == 1.0, używamy cache (szybko).
-        # Jeśli skala > 1.0 (druk), ładujemy oryginał i skalujemy ładnie (wolno).
-        
-        if skala == 1.0:
-            if s.get("_cached_imgs"):
-                 for img, x, y in s["_cached_imgs"]:
-                     self.img.paste(img, (x, y))
-            elif s.get("_cached_img"):
-                 img = s["_cached_img"]
-                 # Centrowanie w slocie
-                 ix = c[0] + (slot_w - img.width) // 2
-                 iy = c[1] + (slot_h - img.height) // 2
-                 self.img.paste(img, (ix, iy))
-        
-        else:
-            # TRYB HI-RES / DRUK
-            # Wersja uproszczona: Skalujemy tylko pojedyncze obrazy. 
-            # Kolaże/sytemu cache - tutaj, dla bezpieczeństwa, przeskalujemy bitmapę z cache (mniej ostre, ale działa pewnie).
-            # Rozbudowa kolaży na 300DPI wymagałaby przebudowy cache.
-            
-            if s.get("image_path") and not s.get("kolaz"):
-                 # Pojedynczy obraz - ładujemy oryginał dla jakości!
-                 path = self._resolve_image_path(s["image_path"])
-                 if os.path.exists(path):
-                     orig = Image.open(path).convert("RGB")
-                     orig.thumbnail((slot_w, slot_h), Image.LANCZOS)
-                     
-                     ix = c[0] + (slot_w - orig.width) // 2
-                     iy = c[1] + (slot_h - orig.height) // 2
-                     self.img.paste(orig, (ix, iy))
-            
-            elif s.get("_cached_imgs") or s.get("_cached_img"):
-                 # Fallback dla kolażu lub braku pliku: skalujemy to co mamy w RAM
-                 # To nie da jakości 300DPI, ale zachowa układ.
-                 pass 
-                 # TODO: W przyszłości dodać rebuilding kolażu dla scale > 1
-                 # Na razie pomijamy fallback renderowania starego cache na dużym canvasie,
-                 # bo byłoby to skomplikowane pozycyjnie. 
-                 # Jeśli użytkownik chce 300DPI kolażu, to na razie dostanie puste lub trzeba by przeskalować każdy element.
+        # 2. Obraz / Kolaż
+        if "collage_items" in cache and cache["collage_items"]:
+            # Rysowanie kolażu z cache
+            for item in cache["collage_items"]:
+                # Pozycje są relatywne dla 1.0. Skalujemy je.
+                ix = c[0] + int(item["rel_x"] * skala)
+                iy = c[1] + int(item["rel_y"] * skala)
+                iw = int(item["w"] * skala)
+                ih = int(item["h"] * skala)
+                
+                if iw > 0 and ih > 0:
+                    img = self._zaladuj_obraz_z_cache(item["path"])
+                    # Resize na żywo (dla jakości pri druku można by ładować high-res, ale cache trzyma 'path' więc ok)
+                    # Używamy Laczos
+                    img_resized = img.resize((iw, ih), Image.LANCZOS)
+                    self.img.paste(img_resized, (ix, iy))
+                    
+        elif s.get("image_path") and not s.get("kolaz"):
+             # Pojedynczy obraz
+             path = self._resolve_image_path(s["image_path"])
+             if os.path.exists(path):
+                 orig = Image.open(path).convert("RGB")
                  
-                 # PROSTE PODEJŚCIE: Skalujemy cache i wklejamy
-                 if s.get("_cached_img"):
-                     im = s["_cached_img"].copy()
-                     im = im.resize((int(im.width*skala), int(im.height*skala)), Image.NEAREST) # Nearest dla szybkości lub Bicubic
-                     ix = c[0] + (slot_w - im.width) // 2
-                     iy = c[1] + (slot_h - im.height) // 2
-                     self.img.paste(im, (ix, iy))
-                     
-                 if s.get("_cached_imgs"):
-                     for sm_img, ox, oy in s["_cached_imgs"]:
-                        nm_img = sm_img.resize((int(sm_img.width*skala), int(sm_img.height*skala)))
-                        nx = int(ox * skala)
-                        ny = int(oy * skala)
-                        self.img.paste(nm_img, (nx, ny))
+                 # Centrowanie i skalowanie (contain)
+                 # Możemy to obliczyć tu, bo to deterministyczne z natury (tylko geometria)
+                 orig_w, orig_h = orig.size
+                 scale_factor = min(slot_w / orig_w, slot_h / orig_h)
+                 fw = int(orig_w * scale_factor)
+                 fh = int(orig_h * scale_factor)
+                 
+                 ix = c[0] + (slot_w - fw) // 2
+                 iy = c[1] + (slot_h - fh) // 2
+                 
+                 if fw > 0 and fh > 0:
+                     orig_resized = orig.resize((fw, fh), Image.LANCZOS)
+                     self.img.paste(orig_resized, (ix, iy))
 
 
         # 3. Obramowanie
@@ -217,207 +408,153 @@ class Szablony:
             self.draw.rectangle(c, outline=s["outline"], width=width)
 
         # 4. Tekst
-        if s.get("tekst"):
-            self._renderuj_tekst_bezpieczny(i, skala)
+        if "final_text" in cache and cache["final_text"]:
+            self._renderuj_tekst_z_cache(i, cache["final_text"], skala)
 
-    def _pobierz_tekst_ze_zrodla(self, dane_tekstu):
-        """
-        Parsuje słownik konfiguracji tekstu lub string.
-        Zwraca: (treść_stringa, align_string)
-        """
-        # Domyślne wartości
-        text_content = ""
-        align = "center"
-        
-        if isinstance(dane_tekstu, str):
-            # Kompatybilność wsteczna - po prostu napis
-            return dane_tekstu, "center"
-            
-        if isinstance(dane_tekstu, dict):
-            typ = dane_tekstu.get("typ", "manual")
-            align = dane_tekstu.get("align", "center")
-            
-            if typ == "manual":
-                text_content = dane_tekstu.get("value", "")
-            
-            elif typ == "file":
-                filename = dane_tekstu.get("file", "")
-                separator = dane_tekstu.get("separator", ",")
-                try:
-                    idx = int(dane_tekstu.get("index", 0))
-                except:
-                    idx = 0
-                
-                # Odczyt z pliku
-                from paths import napraw_sciezke
-                fpath = napraw_sciezke(filename, "txt")
-                
-                if fpath and fpath.exists():
-                    try:
-                        with open(fpath, "r", encoding="utf-8") as f:
-                            raw = f.read()
-                        # Podział
-                        parts = raw.split(separator)
-                        if idx < len(parts):
-                            text_content = parts[idx].strip()
-                        else:
-                            text_content = f"[BRAK INDEXU {idx}]"
-                    except Exception as e:
-                        text_content = f"[BŁĄD PLIKU]"
-                else:
-                    text_content = "[BRAK PLIKU]"
-        
-        return text_content, align
-
-    def _renderuj_tekst_bezpieczny(self, i, skala=1.0):
-        """
-        Renderuje tekst z uwzględnieniem konfiguracji (plik, align) i skali.
-        """
+    def _renderuj_tekst_z_cache(self, i, txt, skala=1.0):
+        """To samo co wcześniej _renderuj_tekst_bezpieczny, ale bierze gotowy string."""
         s = self.sloty[i]
-        base_c = s["coords"]
+        c_base = s["coords"]
+        c = [int(val * skala) for val in c_base]
         
-        # Przeliczanie współrzędnych
-        c = [int(val * skala) for val in base_c]
-        
-        # Pobranie treści i ustawień
-        txt, align = self._pobierz_tekst_ze_zrodla(s["tekst"])
-        
-        if not txt:
-            return
-
-        # Obliczanie max boxa
+        # Konfiguracja align
+        align = "center"
+        if isinstance(s["tekst"], dict):
+            align = s["tekst"].get("align", "center")
+            
+        # ... Logika czcionek i rysowania ...
         w = c[2] - c[0]
         h = c[3] - c[1]
         
-        # Marginesy (bezpieczeństwo) - startowo 10px przy skali 1.0
         base_margin = int(10 * skala)
-        
-        # Dla małych slotów zmniejszamy margines, żeby tekst nie zniknął
-        # Margines nie może być większy niż 15% wymiaru (łącznie 30% na oba marginesy)
         margin_x = min(base_margin, int(w * 0.15))
         margin_y = min(base_margin, int(h * 0.15))
         
-        # Maksymalny obszar na tekst
         max_w = w - (2 * margin_x)
         max_h = h - (2 * margin_y)
         
-        # Jeśli box jest mikroskopijny, nie rysujemy (ale teraz próg jest niższy)
         if max_w < 1 or max_h < 1:
             return
 
         font = ImageFont.load_default()
-        
-        # Zakres szukania czcionki zależny od skali (dla 300DPI > 1.0 potrzebujemy większych fontów)
         start_size = int(100 * skala if skala >= 1 else 100)
         
         found_font = False
-        smallest_font = None # Fallback
+        smallest_font = None 
         
         try:
-            # Pętla szukania pasującego rozmiaru
             for size in range(start_size, 4, -2):
                 f = ImageFont.truetype("arial.ttf", size)
                 smallest_font = f
-                
                 bb = self.draw.textbbox((0, 0), txt, font=f)
                 bw = bb[2] - bb[0]
                 bh = bb[3] - bb[1]
-                
-                # Sprawdzenie czy się mieści z lekkim zapasem (np. 95% max_w)
                 if bw <= max_w and bh <= max_h:
                     font = f
                     found_font = True
                     break
             
-            # Jeśli nie znaleziono pasującego (tekst za długi nawet dla size=6),
-            # używamy najmniejszej czcionki z pętli zamiast defaultowej (która może być duża)
             if not found_font and smallest_font:
                 font = smallest_font
-                
         except:
-            # Jeśli arial nie działa, zostaje load_default()
             pass
             
-        # Ustalanie pozycji (Anchor)
-        # c[0] = lewa, c[1] = góra, c[2] = prawa, c[3] = dół
         cx = (c[0] + c[2]) / 2
         cy = (c[1] + c[3]) / 2
         
         text_x = cx
         text_y = cy
-        pil_anchor = "mm" # middle-middle domyślnie
+        pil_anchor = "mm"
         
         if align == "left":
             text_x = c[0] + margin_x
-            pil_anchor = "lm" # left-middle
+            pil_anchor = "lm"
         elif align == "right":
             text_x = c[2] - margin_x
-            pil_anchor = "rm" # right-middle
+            pil_anchor = "rm"
             
-        self.draw.text(
-            (text_x, text_y),
-            txt,
-            fill="black",
-            anchor=pil_anchor,
-            font=font
-        )
+        self.draw.text((text_x, text_y), txt, fill="black", anchor=pil_anchor, font=font)
+
 
     def _resolve_image_path(self, sciezka):
-        """Pomocnik do pełnej ścieżki obrazu."""
         from paths import napraw_sciezke
         return napraw_sciezke(sciezka, "img")
+
     def _odbuduj_cache_slotu(self, indeks):
-        s = self.sloty[indeks]
-    
-        if "kolaz" not in s:
+        # W nowej architekturze cache jest budowany w prepare_render_data
+        # Ta metoda jest zachowana dla kompatybilności wstecznej (jeśli coś ją woła)
+        pass
+
+    def wklej_jeden_obraz_na_kolaz(
+        self,
+        indeks,
+        sciezka,
+        ilosc=None,
+        random_cfg=None,
+        source_slot=None,
+        margines_proc=10
+    ):
+        if not (0 <= indeks < len(self.sloty)):
             return
     
-        k = s["kolaz"]
-    
-        if k.get("typ") == "jeden_obraz":
-            # --- RANDOM ---
-            if k.get("random"):
-                self.wklej_jeden_obraz_na_kolaz(
-                    indeks=indeks,
-                    sciezka=k["sciezka"],
-                    random_cfg={
-                        "min": k.get("min", 1),
-                        "max": k.get("max", 1)
-                    },
-                    margines_proc=k.get("margines_proc", 10)
-                )
-            # --- STAŁA ILOŚĆ ---
-            else:
-                self.wklej_jeden_obraz_na_kolaz(
-                    indeks=indeks,
-                    sciezka=k["sciezka"],
-                    ilosc=k.get("ilosc", 1),
-                    margines_proc=k.get("margines_proc", 10)
-                )
+        self.zapisz_undo()
+        
+        s = self.sloty[indeks]
+        
+        # Przygotowanie konfiguracji kolażu
+        kolaz_cfg = {
+            "typ": "jeden_obraz",
+            "sciezka": sciezka,
+            "margines_proc": margines_proc
+        }
+        
+        if source_slot is not None:
+            kolaz_cfg["source_slot"] = source_slot
+            # Resetujemy inne flagi
+            if "random" in kolaz_cfg: del kolaz_cfg["random"]
+            if "ilosc" in kolaz_cfg: del kolaz_cfg["ilosc"]
+            
+        elif random_cfg:
+            kolaz_cfg["random"] = True
+            kolaz_cfg["min"] = random_cfg["min"]
+            kolaz_cfg["max"] = random_cfg["max"]
+            if "source_slot" in kolaz_cfg: del kolaz_cfg["source_slot"]
+            if "ilosc" in kolaz_cfg: del kolaz_cfg["ilosc"]
+            
+        else:
+            # Stała ilość
+            kolaz_cfg["ilosc"] = ilosc if ilosc is not None else 1
+            if "source_slot" in kolaz_cfg: del kolaz_cfg["source_slot"]
+            if "random" in kolaz_cfg: del kolaz_cfg["random"]
+
+        s["kolaz"] = kolaz_cfg
+        
+        # Czyścimy cache dla tego slotu, aby wymusić przeliczenie
+        if indeks in self._render_cache:
+            del self._render_cache[indeks]
+            
+        self.render_all()
 
     # =====================================================
     # UNDO REDO
     # =====================================================
-    # snspshot projektu
     def _snapshot(self):
         return {
             "szerokosc": self.szerokosc,
             "wysokosc": self.wysokosc,
-            "sloty": copy.deepcopy(self.sloty)
+            "sloty": copy.deepcopy(self.sloty),
+            "_render_cache": copy.deepcopy(self._render_cache) # Zapisujemy stan wizualny
         }
-    # zapis undo
     def zapisz_undo(self):
         snapshot = self._snapshot()
         if self._undo_stack and snapshot == self._undo_stack[-1]:
             return
-        
         
         self._undo_stack.append(snapshot)
         if len(self._undo_stack) > self._max_undo:
             self._undo_stack.pop(0)
         self._redo_stack.clear()
         
-    # undo
     def undo(self):
         if not self._undo_stack:
             return
@@ -428,11 +565,11 @@ class Szablony:
         self.szerokosc = stan["szerokosc"]
         self.wysokosc = stan["wysokosc"]
         self.sloty = stan["sloty"]
+        self._render_cache = stan.get("_render_cache", {})
 
-        self._odbuduj_cache()
+        # self._odbuduj_cache() # Już niepotrzebne
         self.render_all()
         
-    # redo
     def redo(self):
         if not self._redo_stack:
             return
@@ -443,20 +580,13 @@ class Szablony:
         self.szerokosc = stan["szerokosc"]
         self.wysokosc = stan["wysokosc"]
         self.sloty = stan["sloty"]
+        self._render_cache = stan.get("_render_cache", {})
 
-        self._odbuduj_cache()
         self.render_all()
         
-    # odbudowa pamieci (obrazki)
     def _odbuduj_cache(self):
-        for i, s in enumerate(self.sloty):
-            s["_cached_img"] = None
-            s["_cached_imgs"] = None
-
-            if "kolaz" in s:
-                self._odbuduj_cache_slotu(i)
-            elif s.get("image_path"):
-                self.wstaw_obrazek(i, s["image_path"])
+        # Wrapper dla kompatybilności
+        self.prepare_render_data(force=False)
                 
   # ========================================
     # TRANSFORMACJE SLOTÓW
@@ -517,6 +647,7 @@ class Szablony:
         """Tworzy siatkę slotów."""
         self.zapisz_undo()
         self.sloty = []
+        self._render_cache = {} # Reset cache przy nowej siatce
 
         sz_k = self.szerokosc / kolumny
         w_k = self.wysokosc / wiersze
@@ -537,10 +668,10 @@ class Szablony:
                     "outline": "black",
                     "outline_width": 2,
                     "image_path": None,
-                    "_cached_img": None,
                     "tekst": None
                 })
-
+        
+        self.prepare_render_data(force=True)
         self.render_all()
 
     def edytuj_slot(self, indeks, **kwargs):
@@ -548,6 +679,10 @@ class Szablony:
         if 0 <= indeks < len(self.sloty):
             self.zapisz_undo()
             self.sloty[indeks].update(kwargs)
+            
+            # Reset cache tego slotu
+            if indeks in self._render_cache:
+                del self._render_cache[indeks]
             self.render_all()
 
     def usun_slot(self, indeks):
@@ -555,6 +690,10 @@ class Szablony:
         if 0 <= indeks < len(self.sloty):
             self.zapisz_undo()
             self.sloty.pop(indeks)
+            
+            # Pełny reset, bo indeksy się zmieniają
+            self._render_cache = {}
+            self.prepare_render_data(force=True)
             self.render_all()
 
     def wstaw_tekst_z_pliku(self, indeks, plik, separator=",", index=0, align="center"):
@@ -568,6 +707,8 @@ class Szablony:
                 "index": index,
                 "align": align
             }
+            if indeks in self._render_cache:
+                del self._render_cache[indeks]
             self.render_all()
 
     def renderuj_wszystkie_projekty(self, skaluj_300dpi=False):
@@ -581,20 +722,19 @@ class Szablony:
         bledy = []
         sukcesy = 0
         
-        # Jeśli druk, to np. skala=4 (dla małych projektów ~800px zrobi się ~3200px)
         scale = 3.0 if skaluj_300dpi else 1.0
         
         for p in pliki:
             try:
-                temp_sz = Szablony() # Nowa instancja by nie psuć obecnej
+                temp_sz = Szablony() 
                 if temp_sz.otworz_projekt(p.name):
-                    # Render
+                    # Wymuś nowe losowanie dla każdego projektu przy eksporcie
+                    temp_sz.prepare_render_data(force=True)
                     temp_sz.render_all(skala=scale)
                     
                     if temp_sz.img:
                         if skaluj_300dpi:
                             out_path = DO_DRUKU_DIR / f"{p.stem}.jpg"
-                            # Dla druku 300 DPI warto ustawić DPI w metadanych pliku
                             temp_sz.img.convert("RGB").save(out_path, "JPEG", quality=95, dpi=(300, 300))
                         else:
                             out_path = WYNIKI_DIR / f"{p.stem}.jpg"
@@ -612,7 +752,7 @@ class Szablony:
         if not temp.otworz_projekt(nazwa_projektu):
             raise Exception("Nie znaleziono projektu")
             
-        # Skalujemy x4 dla ~300 DPI (zakładając base ~72-96 DPI)
+        temp.prepare_render_data(force=True)
         scale = 4.0 
         temp.render_all(skala=scale)
         
@@ -631,110 +771,26 @@ class Szablony:
         if not (0 <= indeks < len(self.sloty)):
             return
     
-        # --- UNDO ---
         self.zapisz_undo()
     
         s = self.sloty[indeks]
-        c = s["coords"]
-    
-        max_w = c[2] - c[0]
-        max_h = c[3] - c[1]
-    
-        # --- ładowanie z cache ---
-        img = self._zaladuj_obraz_z_cache(sciezka).copy()
-    
-        # --- skalowanie (contain) ---
-        img.thumbnail((max_w, max_h), Image.LANCZOS)
-    
-        # --- zapis do slotu ---
-        s["_cached_img"] = img
-        s["_cached_imgs"] = None
+        
+        # W nowej architekturze tylko zapisujemy ścieżkę do JSON
+        # Obliczenia i ładowanie nastąpi w render_all (a ten używa cache)
+        # Ale musimy wyczyścić cache tego slotu
+        
         s["image_path"] = sciezka
-    
+        
         # --- czyścimy ewentualny kolaż ---
         if "kolaz" in s:
             del s["kolaz"]
+            
+        # Reset cache
+        if indeks in self._render_cache:
+            del self._render_cache[indeks]
     
         self.render_all()
-    import random
-    
-    def wklej_jeden_obraz_na_kolaz(
-        self,
-        indeks,
-        sciezka,
-        ilosc=None,
-        random_cfg=None,
-        margines_proc=10
-    ):
-        if not (0 <= indeks < len(self.sloty)):
-            return
-    
-        self.zapisz_undo()
-    
-        # --- ustalenie ilości ---
-        if random_cfg:
-            n = random.randint(random_cfg["min"], random_cfg["max"])
-        else:
-            n = ilosc
-    
-        if not n or n <= 0:
-            return
-    
-        s = self.sloty[indeks]
-        c = s["coords"]
-    
-        slot_w = c[2] - c[0]
-        slot_h = c[3] - c[1]
-    
-        # --- siatka ---
-        ratio = slot_w / slot_h
-        cols = max(1, int((n * ratio) ** 0.5))
-        rows = (n + cols - 1) // cols
-    
-        cell_w = slot_w // cols
-        cell_h = slot_h // rows
-    
-        margin_x = int(cell_w * margines_proc / 100)
-        margin_y = int(cell_h * margines_proc / 100)
-    
-        max_w = cell_w - margin_x
-        max_h = cell_h - margin_y
-    
-        base_img = self._zaladuj_obraz_z_cache(sciezka).copy()
-        base_img.thumbnail((max_w, max_h), Image.LANCZOS)
-    
-        cached = []
-    
-        for idx in range(n):
-            r = idx // cols
-            c_idx = idx % cols
-    
-            x = c[0] + c_idx * cell_w + (cell_w - base_img.width) // 2
-            y = c[1] + r * cell_h + (cell_h - base_img.height) // 2
-    
-            cached.append((base_img, x, y))
-    
-        s["_cached_imgs"] = cached
-    
-        # --- zapis opisu do JSON ---
-        if random_cfg:
-            s["kolaz"] = {
-                "typ": "jeden_obraz",
-                "sciezka": sciezka,
-                "random": True,
-                "min": random_cfg["min"],
-                "max": random_cfg["max"],
-                "margines_proc": margines_proc
-            }
-        else:
-            s["kolaz"] = {
-                "typ": "jeden_obraz",
-                "sciezka": sciezka,
-                "random": False,
-                "ilosc": n,
-                "margines_proc": margines_proc
-            }      
-       
+
     def wstaw_wiele_obrazkow(self, lista_sciezek, lista_indeksow):
         """Wstawia wiele obrazów i renderuje raz."""
         for sciezka, indeks in zip(lista_sciezek, lista_indeksow):
@@ -831,16 +887,13 @@ class Szablony:
                 czysty[k] = v
             sloty_json.append(czysty)
 
-        # Tutaj definiujesz ścieżki (to jest OK)
         img_path = WYNIKI_DIR / f"{self.nazwa_projektu}.jpg"
         json_path = PROJEKTY_DIR / f"{self.nazwa_projektu}.json"
 
-        # --- POPRAWKA 1: Zapis obrazu ---
         if self.img:
             self.img.convert("RGB").save(img_path, "JPEG", quality=95)
 
-        # --- POPRAWKA 2: Użycie json_path zamiast f"{self.nazwa_projektu}.json" ---
-        with open(json_path, "w", encoding="utf-8") as f: # <--- TUTAJ była zmiana
+        with open(json_path, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "nazwa": self.nazwa_projektu,
