@@ -236,7 +236,7 @@ class Szablony:
                         elif t == "manual":
                              val_text = dane.get("value", "")
                         elif t == "file":
-                            fpath = self._resolve_image_path(dane.get("file", "")).with_suffix(".txt")
+                            fpath = self._resolve_text_path(dane.get("file", ""))
                             try:
                                 with open(fpath, "r", encoding="utf-8") as f:
                                     raw = f.read()
@@ -246,7 +246,8 @@ class Szablony:
                                     val_text = parts[idx].strip()
                                 else:
                                     val_text = ""
-                            except:
+                            except Exception as e:
+                                print(f"Błąd wczytywania pliku tekstowego {fpath}: {e}")
                                 val_text = "[ERR]"
                 
                 cache_slot["final_text"] = val_text
@@ -479,6 +480,10 @@ class Szablony:
     def _resolve_image_path(self, sciezka):
         from paths import napraw_sciezke
         return napraw_sciezke(sciezka, "img")
+
+    def _resolve_text_path(self, sciezka):
+        from paths import napraw_sciezke
+        return napraw_sciezke(sciezka, "txt")
 
     def _odbuduj_cache_slotu(self, indeks):
         # W nowej architekturze cache jest budowany w prepare_render_data
