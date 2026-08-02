@@ -39,6 +39,7 @@ class Szablony:
         # Klucz: index slotu (int)
         # Wartość: dict { "text": str, "collage": list, "value": int, ... }
         self._render_cache = {}
+        self._computed = {}
         
         # listy fo zspisu undo/redo
         self._undo_stack = []
@@ -112,6 +113,258 @@ class Szablony:
             return Image.new("RGB", (100, 100), "pink")
 
     # =====================================================
+    # COMPUTE ENGINE
+    # =====================================================
+    def compute(self):
+        self._computed = {}
+        for i in range(len(self.sloty)):
+            self._compute_slot(i)
+        self._compute_auto_images()
+        self._compute_letters()
+
+    def _compute_slot(self, i):
+        s = self.sloty[i]
+        self._computed[i] = {}
+        s["visible"] = True
+
+        # LICZBY
+        if s.get("liczba"):
+            cfg = s["liczba"]
+            if cfg.get("random"):
+                val = random.randint(cfg.get("min", 0), cfg.get("max", 100))
+            elif cfg.get("ref") is not None:
+                base = self._computed.get(cfg["ref"], {}).get("value", 0)
+                val = base + cfg.get("offset", 0)
+            else:
+                val = cfg.get("value", 0)
+            self._computed[i]["value"] = val
+
+        # KOLAŻ
+        elif "kolaz" in s:
+            k = s["kolaz"]
+            if k.get("ref_slot") is not None:
+                val = self._computed.get(k["ref_slot"], {}).get("value", 1)
+            elif k.get("source_slot") is not None:
+                val = self._computed.get(k["source_slot"], {}).get("value", 1)
+            elif k.get("random"):
+                val = random.randint(k.get("min", 1), k.get("max", 1))
+            else:
+                val = k.get("ilosc_obrazkow", k.get("ilosc", 1))
+            self._computed[i]["kolaz_count"] = val
+
+        # TEKST
+        tekst_dane = None
+        if s.get("tekst"):
+            tekst_dane = s["tekst"]
+        elif s.get("text"):
+            tekst_dane = s["text"]
+
+        if tekst_dane:
+            if isinstance(tekst_dane, dict):
+                typ = tekst_dane.get("typ", "manual")
+                if typ == "file":
+                    try:
+                        fpath = self._resolve_text_path(tekst_dane.get("file", ""))
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            content = f.read()
+                        parts = content.split(tekst_dane.get("separator", ","))
+                        idx = int(tekst_dane.get("index", 0))
+                        txt = parts[idx].strip() if idx < len(parts) else ""
+                    except Exception:
+                        txt = "ERR"
+                    self._computed[i]["text"] = txt
+                elif typ == "manual":
+                    self._computed[i]["text"] = str(tekst_dane.get("value", ""))
+                elif typ == "random":
+                    range_str = str(tekst_dane.get("range", "1-100"))
+                    try:
+                        parts = range_str.split("-")
+                        min_v, max_v = int(parts[0].strip()), int(parts[1].strip())
+                        if min_v > max_v: min_v, max_v = max_v, min_v
+                        val = random.randint(min_v, max_v)
+                        self._computed[i]["value"] = val
+                        self._computed[i]["text"] = str(val)
+                    except:
+                        pass
+                elif typ == "random_dependent":
+                    src_idx = int(tekst_dane.get("source", -1))
+                    src_val = self._computed.get(src_idx, {}).get("value", 0)
+                    rel = tekst_dane.get("relation", "smaller")
+                    limit = int(tekst_dane.get("limit", 0))
+                    try:
+                        if rel == "smaller":
+                            gorna, dolna = src_val, limit
+                            if dolna > gorna: dolna = gorna
+                            val = random.randint(dolna, gorna)
+                        else:
+                            dolna, gorna = src_val, limit
+                            if dolna > gorna: gorna = dolna
+                            val = random.randint(dolna, gorna)
+                        self._computed[i]["value"] = val
+                        self._computed[i]["text"] = str(val)
+                    except:
+                        pass
+            else:
+                self._computed[i]["text"] = str(tekst_dane)
+
+    def _compute_auto_images(self):
+        from paths import OBRAZY_DIR
+        folders_to_slots = {}
+        for i, s in enumerate(self.sloty):
+            if "auto_images" in s:
+                folder = s["auto_images"].get("folder")
+                if folder:
+                    folders_to_slots.setdefault(folder, []).append(i)
+                    
+        for folder, indices in folders_to_slots.items():
+            folder_path = OBRAZY_DIR / folder
+            if not folder_path.is_dir():
+                continue
+                
+            pliki = [p.name for p in folder_path.glob("*.*") if p.suffix.lower() in [".jpg", ".png", ".jpeg"]]
+            if not pliki:
+                continue
+                
+            repeat = self.sloty[indices[0]]["auto_images"].get("repeat", 1)
+            pula = pliki * repeat
+            random.shuffle(pula)
+            
+            no_same_row = self.sloty[indices[0]]["auto_images"].get("no_same_row", False)
+            
+            for idx in indices:
+                if not pula: break
+                
+                if no_same_row:
+                    my_y = self.sloty[idx]["coords"][1]
+                    used_in_row = set()
+                    for other_idx in indices:
+                        if other_idx == idx: continue
+                        if other_idx in self._computed and "image_path" in self._computed[other_idx]:
+                            other_y = self.sloty[other_idx]["coords"][1]
+                            if abs(my_y - other_y) < 10:
+                                used_img = self._computed[other_idx]["image_path"].split("/")[-1]
+                                used_in_row.add(used_img)
+                                
+                    chosen_img = next((img for img in pula if img not in used_in_row), None)
+                    if chosen_img:
+                        pula.remove(chosen_img)
+                    else:
+                        chosen_img = pula.pop(0)
+                else:
+                    chosen_img = pula.pop(0)
+                    
+                self._computed[idx]["image_path"] = f"{folder}/{chosen_img}"
+
+    def _compute_letters(self):
+        from paths import TEKSTY_DIR
+        for s in self.sloty:
+            if "letters" in s:
+                cfg = s["letters"]
+                file_name = cfg.get("file", "")
+                separator = cfg.get("separator", "")
+                try:
+                    with open(TEKSTY_DIR / file_name, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                    litery = content.split(separator) if separator else list(content)
+                except Exception:
+                    litery = []
+                    
+                gorne = [i for i, slot in enumerate(self.sloty) if slot.get("group") == "gora"]
+                dolne = [i for i, slot in enumerate(self.sloty) if slot.get("group") == "dol"]
+                
+                for idx_in_gora, slot_idx in enumerate(gorne):
+                    if idx_in_gora < len(litery):
+                        self._computed[slot_idx]["letter"] = litery[idx_in_gora]
+                        self._computed[slot_idx]["text"] = litery[idx_in_gora]
+                    else:
+                        self.sloty[slot_idx]["visible"] = False
+                        if idx_in_gora < len(dolne):
+                            self.sloty[dolne[idx_in_gora]]["visible"] = False
+                break
+
+    def _apply_auto_images(self):
+        from paths import OBRAZY_DIR
+        import random
+        
+        folders_to_slots = {}
+        for i, s in enumerate(self.sloty):
+            if "auto_images" in s:
+                folder = s["auto_images"].get("folder")
+                if folder:
+                    folders_to_slots.setdefault(folder, []).append(i)
+                    
+        for folder, indices in folders_to_slots.items():
+            folder_path = OBRAZY_DIR / folder
+            if not folder_path.is_dir():
+                continue
+                
+            pliki = [p.name for p in folder_path.glob("*.*") if p.suffix.lower() in [".jpg", ".png", ".jpeg"]]
+            if not pliki:
+                continue
+                
+            cfg = self.sloty[indices[0]]["auto_images"]
+            repeat = cfg.get("repeat", 1)
+            seed_val = cfg.get("seed", 123)
+            no_repeat_in_row = cfg.get("no_repeat_in_row", False)
+            
+            pula = pliki * repeat
+            rng = random.Random(seed_val)
+            rng.shuffle(pula)
+            
+            for idx in indices:
+                if not pula: break
+                
+                if no_repeat_in_row:
+                    my_y = self.sloty[idx]["coords"][1]
+                    used_in_row = set()
+                    for other_idx in indices:
+                        if other_idx == idx: continue
+                        if other_idx in self._computed and "image_path" in self._computed[other_idx]:
+                            other_y = self.sloty[other_idx]["coords"][1]
+                            if abs(my_y - other_y) < 10:
+                                used_img = self._computed[other_idx]["image_path"].split("/")[-1]
+                                used_in_row.add(used_img)
+                                
+                    chosen_img = next((img for img in pula if img not in used_in_row), None)
+                    if chosen_img:
+                        pula.remove(chosen_img)
+                    else:
+                        chosen_img = pula.pop(0)
+                else:
+                    chosen_img = pula.pop(0)
+                    
+                self._computed[idx]["image_path"] = f"{folder}/{chosen_img}"
+
+    def _apply_letters_layout(self):
+        from paths import TEKSTY_DIR
+        for s in self.sloty:
+            if "letters_layout" in s:
+                cfg = s["letters_layout"]
+                source_file = cfg.get("source_file", "")
+                separator = cfg.get("separator", "")
+                group_name = cfg.get("group", "top")
+                
+                try:
+                    with open(TEKSTY_DIR / source_file, "r", encoding="utf-8") as f:
+                        content = f.read().strip()
+                    litery = content.split(separator) if separator else list(content)
+                except Exception:
+                    litery = []
+                    
+                gorne = [i for i, slot in enumerate(self.sloty) if slot.get("group") == group_name]
+                dolne = [i for i, slot in enumerate(self.sloty) if slot.get("group") == ("bottom" if group_name == "top" else "top")]
+                
+                for idx_in_gora, slot_idx in enumerate(gorne):
+                    if idx_in_gora < len(litery):
+                        self._computed[slot_idx]["letter"] = litery[idx_in_gora]
+                        self._computed[slot_idx]["text"] = litery[idx_in_gora]
+                    else:
+                        self.sloty[slot_idx]["visible"] = False
+                        if idx_in_gora < len(dolne):
+                            self.sloty[dolne[idx_in_gora]]["visible"] = False
+                break
+
+    # =====================================================
     # RENDER ENGINE
     # =====================================================
     
@@ -124,6 +377,9 @@ class Szablony:
         """
         if force:
             self._render_cache = {}
+            self.compute()
+            self._apply_auto_images()
+            self._apply_letters_layout()
             
         # 1. Rozwiązywanie zależności liczbowych (iteracyjnie)
         max_iter = len(self.sloty) + 2
@@ -145,7 +401,12 @@ class Szablony:
                 if get_val(i) is not None:
                     continue
                     
-                tekst_dane = s.get("tekst")
+                tekst_dane = None
+                if s.get("tekst"):
+                    tekst_dane = s["tekst"]
+                elif s.get("text"):
+                    tekst_dane = s["text"]
+
                 if not tekst_dane:
                     continue
                 
@@ -219,14 +480,20 @@ class Szablony:
             cache_slot["last_coords"] = current_coords
             
             # --- TEKST ---
+            tekst_dane = None
             if s.get("tekst"):
+                tekst_dane = s["tekst"]
+            elif s.get("text"):
+                tekst_dane = s["text"]
+
+            if tekst_dane:
                 val_text = ""
                 # Czy to liczba z dependency?
                 if "value" in cache_slot:
                     val_text = str(cache_slot["value"])
                 else:
                     # Inne typy tekstów (file, manual string)
-                    dane = s["tekst"]
+                    dane = tekst_dane
                     if isinstance(dane, str):
                         val_text = dane
                     elif isinstance(dane, dict):
@@ -258,7 +525,11 @@ class Szablony:
                 k = s["kolaz"]
                 # 1. Ilość
                 n = 1
-                if k.get("source_slot") is not None:
+                if k.get("ref_slot") is not None:
+                    src = k["ref_slot"]
+                    if get_val(src) is not None:
+                        n = get_val(src)
+                elif k.get("source_slot") is not None:
                     src = k["source_slot"]
                     if get_val(src) is not None:
                         n = get_val(src)
@@ -333,10 +604,29 @@ class Szablony:
 
                 cache_slot["collage_items"] = layout_items
 
-    def render_all(self, skala=1.0):
-        """Renderuje (TYLKO rysuje) na podstawie _render_cache."""
+    def _render_lines_v2(self, draw, skala=1.0):
+        gorne = [i for i, s in enumerate(self.sloty) if s.get("group") == "top" and s.get("visible", True)]
+        dolne = [i for i, s in enumerate(self.sloty) if s.get("group") == "bottom" and s.get("visible", True)]
         
-        # Upewnij się, że mamy dane (uzupełnia braki, ale nie przelicza istniejących)
+        for idx in range(min(len(gorne), len(dolne))):
+            i_gora = gorne[idx]
+            i_dol = dolne[idx]
+            
+            g_base = self.sloty[i_gora]["coords"]
+            d_base = self.sloty[i_dol]["coords"]
+            
+            g = [int(val * skala) for val in g_base]
+            d = [int(val * skala) for val in d_base]
+            
+            x1 = (g[0] + g[2]) // 2
+            y1 = g[3]
+            
+            x2 = (d[0] + d[2]) // 2
+            y2 = d[1]
+            
+            draw.line((x1, y1, x2, y2), fill="black", width=max(1, int(2 * skala)))
+
+    def render_all(self, skala=1.0):
         self.prepare_render_data(force=False)
         
         w = int(self.szerokosc * skala)
@@ -347,9 +637,39 @@ class Szablony:
 
         for i in range(len(self.sloty)):
             self._renderuj_pojedynczy_slot(i, skala)
+            
+        draw_lines = any(s.get("letters_layout", {}).get("draw_lines", False) for s in self.sloty)
+        if draw_lines:
+            self._render_lines_v2(self.draw, skala)
+
+    def _render_lines(self, skala=1.0):
+        gorne = [i for i, s in enumerate(self.sloty) if s.get("group") == "gora" and s.get("visible", True)]
+        dolne = [i for i, s in enumerate(self.sloty) if s.get("group") == "dol" and s.get("visible", True)]
+        
+        for idx in range(min(len(gorne), len(dolne))):
+            i_gora = gorne[idx]
+            i_dol = dolne[idx]
+            
+            g_base = self.sloty[i_gora]["coords"]
+            d_base = self.sloty[i_dol]["coords"]
+            
+            g = [int(val * skala) for val in g_base]
+            d = [int(val * skala) for val in d_base]
+            
+            x1 = (g[0] + g[2]) // 2
+            y1 = g[3]
+            
+            x2 = (d[0] + d[2]) // 2
+            y2 = d[1]
+            
+            self.draw.line((x1, y1, x2, y2), fill="black", width=max(1, int(2 * skala)))
 
     def _renderuj_pojedynczy_slot(self, i, skala=1.0):
         s = self.sloty[i]
+        
+        if not s.get("visible", True):
+            return
+            
         c_base = s["coords"]
         
         # Przeliczanie współrzędnych wg skali
@@ -360,38 +680,73 @@ class Szablony:
 
         # 0. Dane z cache
         cache = self._render_cache.get(i, {})
+        computed = self._computed.get(i, {})
 
         # 1. Tło slotu
         if s.get("fill"):
             self.draw.rectangle(c, fill=s["fill"])
 
         # 2. Obraz / Kolaż
-        if "collage_items" in cache and cache["collage_items"]:
-            # Rysowanie kolażu z cache
-            for item in cache["collage_items"]:
-                # Pozycje są relatywne dla 1.0. Skalujemy je.
-                ix = c[0] + int(item["rel_x"] * skala)
-                iy = c[1] + int(item["rel_y"] * skala)
-                iw = int(item["w"] * skala)
-                ih = int(item["h"] * skala)
+        if "kolaz" in s:
+            n = computed.get("kolaz_count", 0)
+            if n > 0:
+                k = s["kolaz"]
+                ratio = slot_w / slot_h if slot_h > 0 else 1
+                cols = max(1, int((n * ratio) ** 0.5))
+                rows = max(1, (n + cols - 1) // cols)
+                cell_w = max(1, slot_w // cols)
+                cell_h = max(1, slot_h // rows)
+                margines_proc = k.get("margines_proc", 10)
+                margin_x = int(cell_w * margines_proc / 100)
+                margin_y = int(cell_h * margines_proc / 100)
+                max_w = max(1, cell_w - margin_x)
+                max_h = max(1, cell_h - margin_y)
+                base_path = k.get("sciezka", "")
                 
-                if iw > 0 and ih > 0:
-                    img = self._zaladuj_obraz_z_cache(item["path"])
-                    # Resize na żywo (dla jakości pri druku można by ładować high-res, ale cache trzyma 'path' więc ok)
-                    # Używamy Laczos
-                    img_resized = img.resize((iw, ih), Image.LANCZOS)
-                    self.img.paste(img_resized, (ix, iy))
+                try:
+                    img_obj = self._zaladuj_obraz_z_cache(base_path)
+                    iw, ih = img_obj.size
                     
+                    scale_factor = min(max_w / max(1, iw), max_h / max(1, ih))
+                    fw = int(iw * scale_factor)
+                    fh = int(ih * scale_factor)
+                    
+                    if fw > 0 and fh > 0:
+                        img_resized = img_obj.resize((fw, fh), Image.LANCZOS)
+                        
+                        for idx in range(n):
+                            r = idx // cols
+                            c_idx = idx % cols
+                            cell_x = c[0] + c_idx * cell_w
+                            cell_y = c[1] + r * cell_h
+                            ix = cell_x + (cell_w - fw) // 2
+                            iy = cell_y + (cell_h - fh) // 2
+                            self.img.paste(img_resized, (ix, iy))
+                except:
+                    pass
+                    
+        elif computed.get("image_path"):
+             path = self._resolve_image_path(computed["image_path"])
+             if os.path.exists(path):
+                 orig = Image.open(path).convert("RGB")
+                 orig_w, orig_h = orig.size
+                 scale_factor = min(slot_w / max(1, orig_w), slot_h / max(1, orig_h))
+                 fw = int(orig_w * scale_factor)
+                 fh = int(orig_h * scale_factor)
+                 ix = c[0] + (slot_w - fw) // 2
+                 iy = c[1] + (slot_h - fh) // 2
+                 if fw > 0 and fh > 0:
+                     orig_resized = orig.resize((fw, fh), Image.LANCZOS)
+                     self.img.paste(orig_resized, (ix, iy))
+                     
         elif s.get("image_path") and not s.get("kolaz"):
-             # Pojedynczy obraz
+             # Pojedynczy obraz stary kod
              path = self._resolve_image_path(s["image_path"])
              if os.path.exists(path):
                  orig = Image.open(path).convert("RGB")
                  
-                 # Centrowanie i skalowanie (contain)
-                 # Możemy to obliczyć tu, bo to deterministyczne z natury (tylko geometria)
                  orig_w, orig_h = orig.size
-                 scale_factor = min(slot_w / orig_w, slot_h / orig_h)
+                 scale_factor = min(slot_w / max(1, orig_w), slot_h / max(1, orig_h))
                  fw = int(orig_w * scale_factor)
                  fh = int(orig_h * scale_factor)
                  
@@ -409,7 +764,13 @@ class Szablony:
             self.draw.rectangle(c, outline=s["outline"], width=width)
 
         # 4. Tekst
-        if "final_text" in cache and cache["final_text"]:
+        txt = computed.get("text")
+        if txt is None and "value" in computed:
+            txt = str(computed["value"])
+            
+        if txt is not None:
+            self._renderuj_tekst_z_cache(i, str(txt), skala)
+        elif "final_text" in cache and cache["final_text"]:
             self._renderuj_tekst_z_cache(i, cache["final_text"], skala)
 
     def _renderuj_tekst_z_cache(self, i, txt, skala=1.0):
@@ -420,8 +781,14 @@ class Szablony:
         
         # Konfiguracja align
         align = "center"
-        if isinstance(s["tekst"], dict):
-            align = s["tekst"].get("align", "center")
+        tekst_dane = None
+        if s.get("tekst"):
+            tekst_dane = s["tekst"]
+        elif s.get("text"):
+            tekst_dane = s["text"]
+
+        if isinstance(tekst_dane, dict):
+            align = tekst_dane.get("align", "center")
             
         # ... Logika czcionek i rysowania ...
         w = c[2] - c[0]
@@ -538,7 +905,7 @@ class Szablony:
         if indeks in self._render_cache:
             del self._render_cache[indeks]
             
-        self.render_all()
+        self._compute_slot(indeks)
 
     # =====================================================
     # UNDO REDO
@@ -548,8 +915,10 @@ class Szablony:
             "szerokosc": self.szerokosc,
             "wysokosc": self.wysokosc,
             "sloty": copy.deepcopy(self.sloty),
-            "_render_cache": copy.deepcopy(self._render_cache) # Zapisujemy stan wizualny
+            "_render_cache": copy.deepcopy(self._render_cache), # Zapisujemy stan wizualny
+            "_computed": copy.deepcopy(self._computed) if hasattr(self, '_computed') else {}
         }
+        
     def zapisz_undo(self):
         snapshot = self._snapshot()
         if self._undo_stack and snapshot == self._undo_stack[-1]:
@@ -571,9 +940,7 @@ class Szablony:
         self.wysokosc = stan["wysokosc"]
         self.sloty = stan["sloty"]
         self._render_cache = stan.get("_render_cache", {})
-
-        # self._odbuduj_cache() # Już niepotrzebne
-        self.render_all()
+        self._computed = stan.get("_computed", {})
         
     def redo(self):
         if not self._redo_stack:
@@ -586,8 +953,7 @@ class Szablony:
         self.wysokosc = stan["wysokosc"]
         self.sloty = stan["sloty"]
         self._render_cache = stan.get("_render_cache", {})
-
-        self.render_all()
+        self._computed = stan.get("_computed", {})
         
     def _odbuduj_cache(self):
         # Wrapper dla kompatybilności
@@ -688,7 +1054,18 @@ class Szablony:
             # Reset cache tego slotu
             if indeks in self._render_cache:
                 del self._render_cache[indeks]
-            self.render_all()
+            self._compute_slot(indeks)
+
+    def edytuj_wszystkie_sloty(self, **kwargs):
+        """Edytuje właściwości wszystkich slotów naraz."""
+        if not self.sloty:
+            return
+        self.zapisz_undo()
+        for i, s in enumerate(self.sloty):
+            s.update(copy.deepcopy(kwargs))
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
 
     def usun_slot(self, indeks):
         """Usuwa slot."""
@@ -699,7 +1076,6 @@ class Szablony:
             # Pełny reset, bo indeksy się zmieniają
             self._render_cache = {}
             self.prepare_render_data(force=True)
-            self.render_all()
 
     def wstaw_tekst_z_pliku(self, indeks, plik, separator=",", index=0, align="center"):
         """Ustawia slot w tryb tekstu z pliku."""
@@ -714,7 +1090,18 @@ class Szablony:
             }
             if indeks in self._render_cache:
                 del self._render_cache[indeks]
-            self.render_all()
+            self._compute_slot(indeks)
+
+    def ustaw_tekst_wszystkim(self, tekst_dane):
+        """Ustawia konfigurację tekstu dla wszystkich slotów naraz."""
+        if not self.sloty:
+            return
+        self.zapisz_undo()
+        for i, s in enumerate(self.sloty):
+            s["tekst"] = copy.deepcopy(tekst_dane)
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
 
     def renderuj_wszystkie_projekty(self, skaluj_300dpi=False):
         """
@@ -794,13 +1181,59 @@ class Szablony:
         if indeks in self._render_cache:
             del self._render_cache[indeks]
     
-        self.render_all()
+        self._compute_slot(indeks)
+
+    def wstaw_obrazek_wszystkim(self, sciezka):
+        """Wstawia ten sam obraz do wszystkich slotów."""
+        if not self.sloty:
+            return
+        self.zapisz_undo()
+        for i, s in enumerate(self.sloty):
+            s["image_path"] = sciezka
+            if "kolaz" in s:
+                del s["kolaz"]
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
+
+    def wklej_kolaz_wszystkim(
+        self,
+        sciezka,
+        ilosc=None,
+        random_cfg=None,
+        source_slot=None,
+        margines_proc=10
+    ):
+        """Ustawia kolaż dla wszystkich slotów naraz."""
+        if not self.sloty:
+            return
+        self.zapisz_undo()
+        
+        kolaz_cfg = {
+            "typ": "jeden_obraz",
+            "sciezka": sciezka,
+            "margines_proc": margines_proc
+        }
+        
+        if source_slot is not None and source_slot >= 0:
+            kolaz_cfg["source_slot"] = source_slot
+        elif random_cfg:
+            kolaz_cfg["random"] = True
+            kolaz_cfg["min"] = random_cfg["min"]
+            kolaz_cfg["max"] = random_cfg["max"]
+        else:
+            kolaz_cfg["ilosc"] = ilosc if ilosc is not None else 1
+
+        for i, s in enumerate(self.sloty):
+            s["kolaz"] = copy.deepcopy(kolaz_cfg)
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
 
     def wstaw_wiele_obrazkow(self, lista_sciezek, lista_indeksow):
         """Wstawia wiele obrazów i renderuje raz."""
         for sciezka, indeks in zip(lista_sciezek, lista_indeksow):
             self.wstaw_obrazek(indeks, sciezka)
-        self.render_all()
 
     # =====================================================
     # OPERATORY

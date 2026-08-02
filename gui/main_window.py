@@ -35,6 +35,9 @@ class MainWindow(tk.Tk):
         ttk.Button(panel, text="Nowy projekt", command=self.nowy_projekt).pack(fill="x", pady=2)
         ttk.Button(panel, text="Otwórz projekt", command=self.otworz_projekt).pack(fill="x", pady=2)
         ttk.Button(panel, text="Generuj siatkę", command=self.generuj_siatke).pack(fill="x", pady=2)
+        
+        ttk.Separator(panel).pack(fill="x", pady=5)
+        ttk.Button(panel, text="Przylosuj (Re-roll)", command=self.przelicz_ponownie).pack(fill="x", pady=2)
         ttk.Button(panel, text="Renderuj wszystkie (Batch)", command=self.batch_render).pack(fill="x", pady=2)
         ttk.Button(panel, text="Renderuj do druku (Wybierz)", command=self.renderuj_do_druku_click).pack(fill="x", pady=2)
         ttk.Button(panel, text="Otwórz folder...", command=self.otworz_folder_click).pack(fill="x", pady=2)
@@ -45,6 +48,8 @@ class MainWindow(tk.Tk):
         ttk.Label(panel, text="EDYCJA", font=("Arial", 10, "bold")).pack(pady=5)
         self.btn_edit = ttk.Button(panel, text="Edytuj slot", command=self.otworz_edytor, state="disabled")
         self.btn_edit.pack(fill="x", pady=2)
+        self.btn_edit_all = ttk.Button(panel, text="Edytuj wszystkie sloty", command=self.otworz_edytor_wszystkich, state="disabled")
+        self.btn_edit_all.pack(fill="x", pady=2)
         ttk.Button(panel, text="Usuń slot", command=self.usun_slot).pack(fill="x", pady=2)
 
         ttk.Separator(panel).pack(fill="x", pady=10)
@@ -161,6 +166,11 @@ class MainWindow(tk.Tk):
             s.sz.nowy_projekt(nazwa, w, h)
             s.render()
         logic(self)
+
+    def przelicz_ponownie(self):
+        """Wymusza przeliczenie losowych wartości w aktualnym projekcie."""
+        self.sz.prepare_render_data(force=True)
+        self.render()
 
     def generuj_siatke(self):
         from gui.dialogs import with_dialog
@@ -315,8 +325,20 @@ class MainWindow(tk.Tk):
             self.sz.zapamietaj_baze_slotu(self.aktualny_slot)
             SlotEditorWindow(self, self.sz, self.aktualny_slot)
 
+    def otworz_edytor_wszystkich(self):
+        if not self.sz.sloty:
+            messagebox.showwarning("Brak slotów", "Projekt nie posiada żadnych slotów do edycji.")
+            return
+        from gui.slot_editor import AllSlotsEditorWindow
+        AllSlotsEditorWindow(self, self.sz)
+
     def render(self):
         from PIL import ImageTk
+        if hasattr(self, 'btn_edit_all'):
+            if self.sz.sloty:
+                self.btn_edit_all.config(state="normal")
+            else:
+                self.btn_edit_all.config(state="disabled")
         self.sz.render_all()
         if self.sz.img:
             self.tk_img = ImageTk.PhotoImage(self.sz.img)
