@@ -119,8 +119,36 @@ class Szablony:
         self._computed = {}
         for i in range(len(self.sloty)):
             self._compute_slot(i)
+        self._compute_unique_numbers()
         self._compute_auto_images()
         self._compute_letters()
+
+    def _compute_unique_numbers(self):
+        groups = {}
+        for i, s in enumerate(self.sloty):
+            tekst_dane = s.get("tekst") or s.get("text")
+            if isinstance(tekst_dane, dict) and tekst_dane.get("typ") in ("random_unique", "random_no_repeat"):
+                gid = tekst_dane.get("group_id", f"grp_{tekst_dane.get('min', 1)}_{tekst_dane.get('max', 100)}")
+                groups.setdefault(gid, []).append(i)
+
+        for gid, indices in groups.items():
+            if not indices:
+                continue
+            first_cfg = self.sloty[indices[0]].get("tekst") or self.sloty[indices[0]].get("text")
+            min_v = int(first_cfg.get("min", 1))
+            max_v = int(first_cfg.get("max", 100))
+            if min_v > max_v:
+                min_v, max_v = max_v, min_v
+
+            dostepne = list(range(min_v, max_v + 1))
+            k = min(len(indices), len(dostepne))
+            wylosowane = random.sample(dostepne, k)
+
+            for idx, val in zip(indices[:k], wylosowane):
+                if idx not in self._computed:
+                    self._computed[idx] = {}
+                self._computed[idx]["value"] = val
+                self._computed[idx]["text"] = str(val)
 
     def _compute_slot(self, i):
         s = self.sloty[i]
@@ -186,6 +214,15 @@ class Szablony:
                         self._computed[i]["text"] = str(val)
                     except:
                         pass
+                elif typ in ("random_unique", "random_no_repeat"):
+                    if i in self._computed and "value" in self._computed[i]:
+                        val = self._computed[i]["value"]
+                    else:
+                        min_v = int(tekst_dane.get("min", 1))
+                        max_v = int(tekst_dane.get("max", 100))
+                        val = random.randint(min_v, max_v)
+                    self._computed[i]["value"] = val
+                    self._computed[i]["text"] = str(val)
                 elif typ == "random_dependent":
                     src_idx = int(tekst_dane.get("source", -1))
                     src_val = self._computed.get(src_idx, {}).get("value", 0)
@@ -434,6 +471,14 @@ class Szablony:
                             nowa_wartosc = random.randint(min_v, max_v)
                     except:
                         pass
+                
+                elif typ in ("random_unique", "random_no_repeat"):
+                    if i in self._computed and "value" in self._computed[i]:
+                        nowa_wartosc = self._computed[i]["value"]
+                    else:
+                        min_v = int(tekst_dane.get("min", 1))
+                        max_v = int(tekst_dane.get("max", 100))
+                        nowa_wartosc = random.randint(min_v, max_v)
                 
                 elif typ == "random_dependent":
                     src_idx = int(tekst_dane.get("source", -1))
@@ -859,53 +904,48 @@ class Szablony:
 
     def wklej_jeden_obraz_na_kolaz(
         self,
-        indeks,
-        sciezka,
+        indeks=None,
+        sciezka=None,
         ilosc=None,
         random_cfg=None,
         source_slot=None,
-        margines_proc=10
+        margines_proc=10,
+        slots=None
     ):
-        if not (0 <= indeks < len(self.sloty)):
+        if slots is not None:
+            target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+        elif indeks is not None:
+            target_slots = [indeks] if 0 <= indeks < len(self.sloty) else []
+        else:
+            target_slots = []
+
+        if not target_slots:
             return
-    
+
         self.zapisz_undo()
-        
-        s = self.sloty[indeks]
-        
+
         # Przygotowanie konfiguracji kolażu
         kolaz_cfg = {
             "typ": "jeden_obraz",
             "sciezka": sciezka,
             "margines_proc": margines_proc
         }
-        
-        if source_slot is not None:
+
+        if source_slot is not None and source_slot >= 0:
             kolaz_cfg["source_slot"] = source_slot
-            # Resetujemy inne flagi
-            if "random" in kolaz_cfg: del kolaz_cfg["random"]
-            if "ilosc" in kolaz_cfg: del kolaz_cfg["ilosc"]
-            
         elif random_cfg:
             kolaz_cfg["random"] = True
             kolaz_cfg["min"] = random_cfg["min"]
             kolaz_cfg["max"] = random_cfg["max"]
-            if "source_slot" in kolaz_cfg: del kolaz_cfg["source_slot"]
-            if "ilosc" in kolaz_cfg: del kolaz_cfg["ilosc"]
-            
         else:
-            # Stała ilość
             kolaz_cfg["ilosc"] = ilosc if ilosc is not None else 1
-            if "source_slot" in kolaz_cfg: del kolaz_cfg["source_slot"]
-            if "random" in kolaz_cfg: del kolaz_cfg["random"]
 
-        s["kolaz"] = kolaz_cfg
-        
-        # Czyścimy cache dla tego slotu, aby wymusić przeliczenie
-        if indeks in self._render_cache:
-            del self._render_cache[indeks]
-            
-        self._compute_slot(indeks)
+        for i in target_slots:
+            s = self.sloty[i]
+            s["kolaz"] = copy.deepcopy(kolaz_cfg)
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
 
     # =====================================================
     # UNDO REDO
@@ -1045,27 +1085,30 @@ class Szablony:
         self.prepare_render_data(force=True)
         self.render_all()
 
-    def edytuj_slot(self, indeks, **kwargs):
-        """Edytuje właściwości slotu."""
-        if 0 <= indeks < len(self.sloty):
-            self.zapisz_undo()
-            self.sloty[indeks].update(kwargs)
-            
-            # Reset cache tego slotu
-            if indeks in self._render_cache:
-                del self._render_cache[indeks]
-            self._compute_slot(indeks)
+    def edytuj_slot(self, indeks=None, slots=None, **kwargs):
+        """Edytuje właściwości jednego lub wielu slotów."""
+        if slots is not None:
+            target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+        elif indeks is not None:
+            target_slots = [indeks] if 0 <= indeks < len(self.sloty) else []
+        else:
+            target_slots = []
 
-    def edytuj_wszystkie_sloty(self, **kwargs):
-        """Edytuje właściwości wszystkich slotów naraz."""
-        if not self.sloty:
+        if not target_slots:
             return
+
         self.zapisz_undo()
-        for i, s in enumerate(self.sloty):
-            s.update(copy.deepcopy(kwargs))
+        for i in target_slots:
+            self.sloty[i].update(copy.deepcopy(kwargs))
             if i in self._render_cache:
                 del self._render_cache[i]
             self._compute_slot(i)
+
+    def edytuj_wszystkie_sloty(self, slots=None, **kwargs):
+        """Edytuje właściwości wszystkich (lub wskazanych) slotów naraz."""
+        if slots is None:
+            slots = range(len(self.sloty))
+        self.edytuj_slot(slots=slots, **kwargs)
 
     def usun_slot(self, indeks):
         """Usuwa slot."""
@@ -1077,31 +1120,81 @@ class Szablony:
             self._render_cache = {}
             self.prepare_render_data(force=True)
 
-    def wstaw_tekst_z_pliku(self, indeks, plik, separator=",", index=0, align="center"):
-        """Ustawia slot w tryb tekstu z pliku."""
-        if 0 <= indeks < len(self.sloty):
-            self.zapisz_undo()
-            self.sloty[indeks]["tekst"] = {
+    def wstaw_tekst_z_pliku(self, indeks=None, plik="", separator=",", index=0, align="center", slots=None):
+        """Ustawia slot(y) w tryb tekstu z pliku."""
+        if slots is not None:
+            target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+        elif indeks is not None:
+            target_slots = [indeks] if 0 <= indeks < len(self.sloty) else []
+        else:
+            target_slots = []
+
+        if not target_slots:
+            return
+
+        self.zapisz_undo()
+        for i in target_slots:
+            self.sloty[i]["tekst"] = {
                 "typ": "file",
                 "file": plik,
                 "separator": separator,
                 "index": index,
                 "align": align
             }
-            if indeks in self._render_cache:
-                del self._render_cache[indeks]
-            self._compute_slot(indeks)
-
-    def ustaw_tekst_wszystkim(self, tekst_dane):
-        """Ustawia konfigurację tekstu dla wszystkich slotów naraz."""
-        if not self.sloty:
-            return
-        self.zapisz_undo()
-        for i, s in enumerate(self.sloty):
-            s["tekst"] = copy.deepcopy(tekst_dane)
             if i in self._render_cache:
                 del self._render_cache[i]
             self._compute_slot(i)
+
+    def ustaw_tekst_wszystkim(self, tekst_dane, slots=None):
+        """Ustawia konfigurację tekstu dla wszystkich (lub wybranych) slotów naraz."""
+        if slots is None:
+            slots = range(len(self.sloty))
+        target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+        if not target_slots:
+            return
+
+        self.zapisz_undo()
+        for i in target_slots:
+            self.sloty[i]["tekst"] = copy.deepcopy(tekst_dane)
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
+
+    def losuj_liczby_bez_powtorzen(self, min_val, max_val, slots=None):
+        """Przypisuje dynamiczną konfigurację losowych liczb bez powtórzeń (random.sample) do podanych slotów."""
+        import time
+        if slots is None:
+            target_slots = list(range(len(self.sloty)))
+        else:
+            target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+
+        if not target_slots:
+            return
+
+        dostepne = list(range(min_val, max_val + 1))
+        if len(target_slots) > len(dostepne):
+            target_slots = target_slots[:len(dostepne)]
+
+        group_id = f"unique_grp_{min_val}_{max_val}_{int(time.time() * 1000)}"
+
+        self.zapisz_undo()
+        for idx in target_slots:
+            s = self.sloty[idx]
+            current_align = "center"
+            if isinstance(s.get("tekst"), dict):
+                current_align = s["tekst"].get("align", "center")
+            s["tekst"] = {
+                "typ": "random_unique",
+                "group_id": group_id,
+                "min": min_val,
+                "max": max_val,
+                "range": f"{min_val}-{max_val}",
+                "align": current_align
+            }
+            if idx in self._render_cache:
+                del self._render_cache[idx]
+
+        self.compute()
 
     def renderuj_wszystkie_projekty(self, skaluj_300dpi=False):
         """
@@ -1158,37 +1251,21 @@ class Szablony:
     # =====================================================
     # OBRAZY
     # =====================================================
-    def wstaw_obrazek(self, indeks, sciezka):
-        """Wstawia obraz do slotu bez przycinania (tryb contain)."""
-        if not (0 <= indeks < len(self.sloty)):
-            return
-    
-        self.zapisz_undo()
-    
-        s = self.sloty[indeks]
-        
-        # W nowej architekturze tylko zapisujemy ścieżkę do JSON
-        # Obliczenia i ładowanie nastąpi w render_all (a ten używa cache)
-        # Ale musimy wyczyścić cache tego slotu
-        
-        s["image_path"] = sciezka
-        
-        # --- czyścimy ewentualny kolaż ---
-        if "kolaz" in s:
-            del s["kolaz"]
-            
-        # Reset cache
-        if indeks in self._render_cache:
-            del self._render_cache[indeks]
-    
-        self._compute_slot(indeks)
+    def wstaw_obrazek(self, indeks=None, sciezka=None, slots=None):
+        """Wstawia obraz do slotu lub grupy slotów bez przycinania (tryb contain)."""
+        if slots is not None:
+            target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+        elif indeks is not None:
+            target_slots = [indeks] if 0 <= indeks < len(self.sloty) else []
+        else:
+            target_slots = []
 
-    def wstaw_obrazek_wszystkim(self, sciezka):
-        """Wstawia ten sam obraz do wszystkich slotów."""
-        if not self.sloty:
+        if not target_slots:
             return
+
         self.zapisz_undo()
-        for i, s in enumerate(self.sloty):
+        for i in target_slots:
+            s = self.sloty[i]
             s["image_path"] = sciezka
             if "kolaz" in s:
                 del s["kolaz"]
@@ -1196,39 +1273,32 @@ class Szablony:
                 del self._render_cache[i]
             self._compute_slot(i)
 
+    def wstaw_obrazek_wszystkim(self, sciezka, slots=None):
+        """Wstawia ten sam obraz do wszystkich (lub wybranych) slotów."""
+        if slots is None:
+            slots = range(len(self.sloty))
+        self.wstaw_obrazek(sciezka=sciezka, slots=slots)
+
     def wklej_kolaz_wszystkim(
         self,
         sciezka,
         ilosc=None,
         random_cfg=None,
         source_slot=None,
-        margines_proc=10
+        margines_proc=10,
+        slots=None
     ):
-        """Ustawia kolaż dla wszystkich slotów naraz."""
-        if not self.sloty:
-            return
-        self.zapisz_undo()
-        
-        kolaz_cfg = {
-            "typ": "jeden_obraz",
-            "sciezka": sciezka,
-            "margines_proc": margines_proc
-        }
-        
-        if source_slot is not None and source_slot >= 0:
-            kolaz_cfg["source_slot"] = source_slot
-        elif random_cfg:
-            kolaz_cfg["random"] = True
-            kolaz_cfg["min"] = random_cfg["min"]
-            kolaz_cfg["max"] = random_cfg["max"]
-        else:
-            kolaz_cfg["ilosc"] = ilosc if ilosc is not None else 1
-
-        for i, s in enumerate(self.sloty):
-            s["kolaz"] = copy.deepcopy(kolaz_cfg)
-            if i in self._render_cache:
-                del self._render_cache[i]
-            self._compute_slot(i)
+        """Ustawia kolaż dla wszystkich (lub wybranych) slotów naraz."""
+        if slots is None:
+            slots = range(len(self.sloty))
+        self.wklej_jeden_obraz_na_kolaz(
+            sciezka=sciezka,
+            ilosc=ilosc,
+            random_cfg=random_cfg,
+            source_slot=source_slot,
+            margines_proc=margines_proc,
+            slots=slots
+        )
 
     def wstaw_wiele_obrazkow(self, lista_sciezek, lista_indeksow):
         """Wstawia wiele obrazów i renderuje raz."""

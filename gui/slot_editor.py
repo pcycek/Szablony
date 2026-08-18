@@ -478,16 +478,180 @@ def open_text_config_dialog(parent, current_data, on_save_callback):
     ttk.Button(container, text="Zatwierdź", command=on_save).pack(pady=10)
 
 
+class RangeOverflowDialog(tk.Toplevel):
+    def __init__(self, parent, num_slots, num_available):
+        super().__init__(parent)
+        self.title("Zakres za mały")
+        self.result = "reduce"  # Domyślna opcja: "Zmniejsz zaznaczenie"
+        self.transient(parent)
+        self.grab_set()
+
+        container = ttk.Frame(self, padding=20)
+        container.pack(fill="both", expand=True)
+
+        msg = (
+            f"Wybrano więcej slotów ({num_slots}) niż dostępnych unikalnych liczb ({num_available}).\n"
+            "Co chcesz zrobić?"
+        )
+        ttk.Label(container, text=msg, justify="center", font=("Arial", 10)).pack(pady=(0, 15))
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.pack(fill="x", pady=5)
+
+        # 1. Zmniejsz zaznaczenie (Domyślna)
+        b1 = ttk.Button(btn_frame, text="Zmniejsz zaznaczenie", command=lambda: self._set_choice("reduce"))
+        b1.pack(fill="x", pady=3)
+        b1.focus_set()
+
+        # 2. Zwiększ zakres
+        b2 = ttk.Button(btn_frame, text="Zwiększ zakres", command=lambda: self._set_choice("expand"))
+        b2.pack(fill="x", pady=3)
+
+        # 3. Anuluj
+        b3 = ttk.Button(btn_frame, text="Anuluj", command=lambda: self._set_choice("cancel"))
+        b3.pack(fill="x", pady=3)
+
+        self.protocol("WM_DELETE_WINDOW", lambda: self._set_choice("cancel"))
+        self.bind("<Return>", lambda e: self._set_choice("reduce"))
+        self.bind("<Escape>", lambda e: self._set_choice("cancel"))
+
+        self.update_idletasks()
+        self.resizable(False, False)
+        w = self.winfo_reqwidth()
+        h = self.winfo_reqheight()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        x = (sw - w) // 2
+        y = (sh - h) // 2
+        self.geometry(f"+{x}+{y}")
+
+        self.wait_window()
+
+    def _set_choice(self, choice):
+        self.result = choice
+        self.destroy()
+
+
+def open_random_numbers_dialog(parent, sz, slots=None, initial_min=1, initial_max=20):
+    if slots is None:
+        target_slots = list(range(len(sz.sloty)))
+    else:
+        target_slots = list(slots)
+
+    if not target_slots:
+        from tkinter import messagebox
+        messagebox.showwarning("Brak slotów", "Brak slotów do przypisania liczb.")
+        return
+
+    top = tk.Toplevel(parent)
+    top.title("Losuj liczby bez powtórzeń")
+    top.geometry("320x220")
+    top.transient(parent)
+    top.grab_set()
+
+    container = ttk.Frame(top, padding=15)
+    container.pack(fill="both", expand=True)
+
+    ttk.Label(container, text=f"Losowanie dla {len(target_slots)} slotów", font=("Arial", 10, "bold")).pack(anchor="w", pady=(0, 10))
+
+    ttk.Label(container, text="Minimum:").pack(anchor="w", pady=(4, 2))
+    e_min = ttk.Entry(container)
+    e_min.insert(0, str(initial_min))
+    e_min.pack(fill="x")
+
+    ttk.Label(container, text="Maksimum:").pack(anchor="w", pady=(6, 2))
+    e_max = ttk.Entry(container)
+    e_max.insert(0, str(initial_max))
+    e_max.pack(fill="x")
+
+    def on_ok():
+        try:
+            min_val = int(e_min.get().strip())
+            max_val = int(e_max.get().strip())
+        except ValueError:
+            from tkinter import messagebox
+            messagebox.showerror("Błąd", "Wprowadź poprawne liczby całkowite!")
+            return
+
+        if min_val > max_val:
+            min_val, max_val = max_val, min_val
+
+        top.destroy()
+        _process_random_numbers(parent, sz, target_slots, min_val, max_val)
+
+    ttk.Separator(container).pack(fill="x", pady=12)
+    ttk.Button(container, text="Losuj", command=on_ok).pack(fill="x")
+
+    top.update_idletasks()
+    top.resizable(False, False)
+    w = top.winfo_reqwidth()
+    h = top.winfo_reqheight()
+    sw = top.winfo_screenwidth()
+    sh = top.winfo_screenheight()
+    x = (sw - w) // 2
+    y = (sh - h) // 2
+    top.geometry(f"+{x}+{y}")
+
+
+def _process_random_numbers(parent, sz, target_slots, min_val, max_val):
+    num_slots = len(target_slots)
+    avail_count = max_val - min_val + 1
+
+    if num_slots > avail_count:
+        dlg = RangeOverflowDialog(parent, num_slots, avail_count)
+        choice = dlg.result
+
+        if choice == "reduce":
+            final_slots = target_slots[:avail_count]
+            # Zaktualizuj zaznaczenie w oknie głównym, jeśli to dotyczy zaznaczenia
+            mw = parent if hasattr(parent, "selected_slots_ordered") else getattr(parent, "parent", None)
+            if mw and hasattr(mw, "selected_slots_ordered"):
+                mw.selected_slots_ordered = list(final_slots)
+                mw.selected_slots = set(final_slots)
+                if hasattr(mw, "_draw_selection_highlights"):
+                    mw._draw_selection_highlights()
+                if hasattr(mw, "_update_ui_state"):
+                    mw._update_ui_state()
+
+            sz.losuj_liczby_bez_powtorzen(min_val, max_val, slots=final_slots)
+            if hasattr(parent, "parent") and hasattr(parent.parent, "render"):
+                parent.parent.render()
+            elif hasattr(parent, "render"):
+                parent.render()
+
+        elif choice == "expand":
+            open_random_numbers_dialog(parent, sz, slots=target_slots, initial_min=min_val, initial_max=max_val)
+        else:
+            # cancel
+            return
+    else:
+        sz.losuj_liczby_bez_powtorzen(min_val, max_val, slots=target_slots)
+        if hasattr(parent, "parent") and hasattr(parent.parent, "render"):
+            parent.parent.render()
+        elif hasattr(parent, "render"):
+            parent.render()
+
+
 class AllSlotsEditorWindow(tk.Toplevel):
-    def __init__(self, parent, szablony):
+    def __init__(self, parent, szablony, slots=None, title=None):
         super().__init__(parent)
         self.parent = parent
         self.sz = szablony
 
-        self.title("Edytor wszystkich slotów")
-        self.geometry("450x650")
+        # Jeśli slots nie podano, edytujemy wszystkie sloty
+        if slots is not None:
+            self.slots = list(slots)
+            default_title = f"Edycja zaznaczonych slotów ({len(self.slots)})"
+            self.header_text = f"EDYCJA ZAZNACZONYCH ({len(self.slots)} slotów)"
+        else:
+            self.slots = list(range(len(self.sz.sloty)))
+            default_title = "Edytor wszystkich slotów"
+            self.header_text = f"EDYCJA HURTOWA ({len(self.sz.sloty)} slotów)"
+
+        self.title(title if title else default_title)
+        self.geometry("450x700")
         self.transient(parent)
-        
+
         self.sz.zapisz_undo()
         self._build_ui()
 
@@ -498,77 +662,79 @@ class AllSlotsEditorWindow(tk.Toplevel):
         # NAGŁÓWEK
         ttk.Label(
             container, 
-            text=f"EDYCJA HURTOWA ({len(self.sz.sloty)} slotów)", 
+            text=self.header_text, 
             font=("Arial", 11, "bold")
         ).pack(anchor="w", pady=(0, 10))
 
         # --- SEKCJA: WYGLĄD ---
         ttk.Label(container, text="WYGLĄD", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 0))
-        
+
         col_frame = ttk.Frame(container)
         col_frame.pack(fill="x", pady=5)
-        
+
         ttk.Button(col_frame, text="Kolor Tła", command=self._zmien_tlo).pack(side="left", expand=True, padx=2)
         ttk.Button(col_frame, text="Kolor Ramki", command=self._zmien_ramke).pack(side="left", expand=True, padx=2)
-        
+
         ttk.Label(container, text="Grubość ramki:").pack(anchor="w", pady=(5, 0))
         self.out_width = ttk.Entry(container)
-        default_w = str(self.sz.sloty[0].get("outline_width", 2)) if self.sz.sloty else "2"
+        first_idx = self.slots[0] if self.slots else 0
+        default_w = str(self.sz.sloty[first_idx].get("outline_width", 2)) if (0 <= first_idx < len(self.sz.sloty)) else "2"
         self.out_width.insert(0, default_w)
         self.out_width.pack(fill="x", pady=2)
-        
-        ttk.Button(container, text="Ustaw grubość ramki dla wszystkich", command=self._ustaw_grubosc).pack(fill="x", pady=2)
+
+        ttk.Button(container, text="Ustaw grubość ramki", command=self._ustaw_grubosc).pack(fill="x", pady=2)
 
         ttk.Separator(container).pack(fill="x", pady=15)
 
         # --- SEKCJA: MEDIA I TEKST ---
-        ttk.Label(container, text="ZAWARTOŚĆ (WSZYSTKIE SLOTY)", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 0))
-        
-        ttk.Button(container, text="Wstaw Obraz", command=self._wstaw_obraz).pack(fill="x", pady=4)
-        ttk.Button(container, text="Stwórz Kolaż", command=self._wstaw_kolaz).pack(fill="x", pady=4)
-        ttk.Button(container, text="Zmień Tekst", command=self._zmien_tekst).pack(fill="x", pady=4)
+        ttk.Label(container, text="ZAWARTOŚĆ", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 0))
+
+        ttk.Button(container, text="Wstaw Obraz", command=self._wstaw_obraz).pack(fill="x", pady=3)
+        ttk.Button(container, text="Stwórz Kolaż", command=self._wstaw_kolaz).pack(fill="x", pady=3)
+        ttk.Button(container, text="Zmień Tekst", command=self._zmien_tekst).pack(fill="x", pady=3)
+        ttk.Button(container, text="Losuj liczby bez powtórzeń", command=self._losuj_liczby).pack(fill="x", pady=3)
 
         ttk.Separator(container).pack(fill="x", pady=15)
 
         # --- STOPKA ---
         footer = ttk.Frame(container)
         footer.pack(side="bottom", fill="x", pady=10)
-        
+
         ttk.Button(footer, text="ZAMKNIJ", command=self.destroy).pack(side="left", expand=True, padx=5)
 
     def _zmien_tlo(self):
         kolor = colorchooser.askcolor()[1]
         if kolor:
-            self.sz.edytuj_wszystkie_sloty(fill=kolor)
+            self.sz.edytuj_slot(slots=self.slots, fill=kolor)
             self.parent.render()
 
     def _zmien_ramke(self):
         kolor = colorchooser.askcolor()[1]
         if kolor:
-            self.sz.edytuj_wszystkie_sloty(outline=kolor)
+            self.sz.edytuj_slot(slots=self.slots, outline=kolor)
             self.parent.render()
 
     def _ustaw_grubosc(self):
         try:
             w = int(self.out_width.get())
-            self.sz.edytuj_wszystkie_sloty(outline_width=w)
+            self.sz.edytuj_slot(slots=self.slots, outline_width=w)
             self.parent.render()
         except:
             pass
 
     def _wstaw_obraz(self):
         from gui.dialogs import with_dialog
-        @with_dialog(title="Obraz dla wszystkich slotów", fields=[("Nazwa pliku", "str")])
+        @with_dialog(title="Wstaw obraz", fields=[("Nazwa pliku", "str")])
         def logic(pw, s):
-            self.sz.wstaw_obrazek_wszystkim(s)
+            self.sz.wstaw_obrazek(sciezka=s, slots=self.slots)
             self.parent.render()
         logic(self)
 
     def _wstaw_kolaz(self):
         from gui.dialogs import with_dialog
-    
+
         @with_dialog(
-            title="Kolaż dla wszystkich slotów",
+            title="Kolaż",
             fields=[
                 ("Plik", "str"),
                 ("Ilość (0 = random/slot)", "int", 1),
@@ -579,9 +745,10 @@ class AllSlotsEditorWindow(tk.Toplevel):
         )
         def logic(pw, sciezka, ilosc, min_n, max_n, src_slot):
             if src_slot >= 0:
-                self.sz.wklej_kolaz_wszystkim(
+                self.sz.wklej_jeden_obraz_na_kolaz(
                     sciezka=sciezka,
-                    source_slot=src_slot
+                    source_slot=src_slot,
+                    slots=self.slots
                 )
             elif ilosc == 0:
                 if min_n <= 0 or max_n <= 0 or min_n > max_n:
@@ -591,25 +758,43 @@ class AllSlotsEditorWindow(tk.Toplevel):
                         "Dla random: min i max muszą być > 0 oraz min ≤ max"
                     )
                     return
-    
-                self.sz.wklej_kolaz_wszystkim(
+
+                self.sz.wklej_jeden_obraz_na_kolaz(
                     sciezka=sciezka,
-                    random_cfg={"min": min_n, "max": max_n}
+                    random_cfg={"min": min_n, "max": max_n},
+                    slots=self.slots
                 )
             else:
-                self.sz.wklej_kolaz_wszystkim(
+                self.sz.wklej_jeden_obraz_na_kolaz(
                     sciezka=sciezka,
-                    ilosc=ilosc
+                    ilosc=ilosc,
+                    slots=self.slots
                 )
-    
+
             self.parent.render()
-    
+
         logic(self)
 
     def _zmien_tekst(self):
-        first_txt = self.sz.sloty[0].get("tekst") if self.sz.sloty else None
+        first_idx = self.slots[0] if self.slots else 0
+        first_txt = self.sz.sloty[first_idx].get("tekst") if (0 <= first_idx < len(self.sz.sloty)) else None
         def save_cb(tekst_cfg):
-            self.sz.ustaw_tekst_wszystkim(tekst_cfg)
+            if isinstance(tekst_cfg, dict) and tekst_cfg.get("typ") == "file":
+                self.sz.wstaw_tekst_z_pliku(
+                    plik=tekst_cfg["file"],
+                    separator=tekst_cfg["separator"],
+                    index=tekst_cfg["index"],
+                    align=tekst_cfg["align"],
+                    slots=self.slots
+                )
+            else:
+                self.sz.ustaw_tekst_wszystkim(tekst_cfg, slots=self.slots)
             self.parent.render()
 
         open_text_config_dialog(self, first_txt, save_cb)
+
+    def _losuj_liczby(self):
+        open_random_numbers_dialog(self, self.sz, slots=self.slots)
+
+
+GroupSlotsEditorWindow = AllSlotsEditorWindow

@@ -1,5 +1,6 @@
 # Custom Project Ignores
 data/
+wyniki/
 .idea/
 
 # Byte-compiled / optimized / DLL files
