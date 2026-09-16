@@ -2,6 +2,27 @@ import tkinter as tk
 from tkinter import ttk
 from tkinter import colorchooser
 
+ROLE_OPTIONS = [
+    ("", "Brak / Zwykły slot"),
+    ("legend_symbol", "Symbol w legendzie (obrazek)"),
+    ("legend_letter", "Litera w legendzie (tekst)"),
+    ("task_symbol", "Symbol w zadaniu (zagadka)"),
+    ("answer_slot", "Pole na odpowiedź (dla ucznia)")
+]
+ROLE_VAL_TO_LABEL = {val: label for val, label in ROLE_OPTIONS}
+ROLE_LABEL_TO_VAL = {label: val for val, label in ROLE_OPTIONS}
+ROLE_LABEL_TO_VAL.update({
+    "legend_symbol": "legend_symbol",
+    "legend_letter": "legend_letter",
+    "task_symbol": "task_symbol",
+    "answer_slot": "answer_slot",
+    "symbol_legendy": "legend_symbol",
+    "litera_legendy": "legend_letter",
+    "symbol_zadania": "task_symbol",
+    "pole_odpowiedzi": "answer_slot",
+    "odpowiedz": "answer_slot"
+})
+
 class SlotEditorWindow(tk.Toplevel):
     def __init__(self, parent, szablony, indeks_slotu):
         super().__init__(parent)
@@ -15,69 +36,193 @@ class SlotEditorWindow(tk.Toplevel):
         self.temp_coords = self.base_coords.copy()
 
         self.title(f"Edytor Slotu #{indeks_slotu}")
-        self.geometry("450x800")
+        self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self._zatwierdz_i_zamknij)
 
         self._render_job = None
         self._build_ui()
+
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = 460
+        h = min(580, max(420, sh - 100))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(380, 360)
+        self.resizable(True, True)
         
     def _build_ui(self):
-        # 1. TWORZYMY KONTENER (Musi być na samym początku!)
-        container = ttk.Frame(self, padding=15)
-        container.pack(fill="both", expand=True)
+        # 1. Pinned footer na dole okna (przyciski ZAWSZE widoczne)
+        footer = ttk.Frame(self, padding=(10, 8))
+        footer.pack(side="bottom", fill="x")
+        
+        ttk.Button(footer, text="ANULUJ", command=self._anuluj).pack(side="left", expand=True, padx=5)
+        ttk.Button(footer, text="ZATWIERDŹ", command=self._zatwierdz_i_zamknij).pack(side="left", expand=True, padx=5)
+
+        # 2. Przewijalny kontener główny (Canvas + Scrollbar)
+        main_container = ttk.Frame(self)
+        main_container.pack(side="top", fill="both", expand=True)
+
+        canvas = tk.Canvas(main_container, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        container = ttk.Frame(canvas, padding=(12, 10))
+        canvas_window = canvas.create_window((0, 0), window=container, anchor="nw")
+
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        container.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            if not canvas.winfo_exists():
+                return
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+
+        def _bind_mousewheel(e):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel)
+            canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_mousewheel(e):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
+        self.bind("<Enter>", _bind_mousewheel)
+        self.bind("<Leave>", _unbind_mousewheel)
+        self.bind("<Destroy>", lambda e: _unbind_mousewheel(e) if e.widget == self else None)
 
         # --- SEKCJA: GEOMETRIA ---
         ttk.Label(container, text="POZYCJA I ROZMIAR", font=("Arial", 10, "bold")).pack(anchor="w")
         
-        ttk.Label(container, text="Przesunięcie X (Poziomo):").pack(anchor="w", pady=(4,0))
+        ttk.Label(container, text="Przesunięcie X (Poziomo):").pack(anchor="w", pady=(3,0))
         self.move_x = ttk.Scale(container, from_=-100, to=100, command=self._aktualizuj_geo)
         self.move_x.pack(fill="x", pady=2)
         
-        ttk.Label(container, text="Przesunięcie Y (Pionowo):").pack(anchor="w", pady=(4,0))
+        ttk.Label(container, text="Przesunięcie Y (Pionowo):").pack(anchor="w", pady=(3,0))
         self.move_y = ttk.Scale(container, from_=-100, to=100, command=self._aktualizuj_geo)
         self.move_y.pack(fill="x", pady=2)
         
-        ttk.Label(container, text="Skala szerokości (%):").pack(anchor="w", pady=(4,0))
+        ttk.Label(container, text="Skala szerokości (%):").pack(anchor="w", pady=(3,0))
         self.scale_w = ttk.Scale(container, from_=-100, to=100, command=self._aktualizuj_geo)
         self.scale_w.pack(fill="x", pady=2)
         
-        ttk.Label(container, text="Skala wysokości (%):").pack(anchor="w", pady=(4,0))
+        ttk.Label(container, text="Skala wysokości (%):").pack(anchor="w", pady=(3,0))
         self.scale_h = ttk.Scale(container, from_=-100, to=100, command=self._aktualizuj_geo)
         self.scale_h.pack(fill="x", pady=2)
 
-        ttk.Separator(container).pack(fill="x", pady=10)
+        ttk.Separator(container).pack(fill="x", pady=6)
 
-        # --- SEKCJA: WYGLĄD (Tu był błąd) ---
-        ttk.Label(container, text="WYGLĄD", font=("Arial", 10, "bold")).pack(anchor="w", pady=(10,0))
+        # --- SEKCJA: WYGLĄD ---
+        ttk.Label(container, text="WYGLĄD", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4,0))
         
         col_frame = ttk.Frame(container)
-        col_frame.pack(fill="x", pady=5)
+        col_frame.pack(fill="x", pady=4)
         
         ttk.Button(col_frame, text="Kolor Tła", command=self._zmien_tlo).pack(side="left", expand=True, padx=2)
         ttk.Button(col_frame, text="Kolor Ramki", command=self._zmien_ramke).pack(side="left", expand=True, padx=2)
         
-        ttk.Label(container, text="Grubość ramki:").pack(anchor="w")
+        ttk.Label(container, text="Grubość ramki:").pack(anchor="w", pady=(3,0))
         self.out_width = ttk.Entry(container)
         self.out_width.insert(0, str(self.sz.sloty[self.indeks].get("outline_width", 2)))
         self.out_width.pack(fill="x", pady=2)
         
-        ttk.Button(container, text="Ustaw grubość ramki", command=self._ustaw_grubosc).pack(fill="x")
+        ttk.Button(container, text="Ustaw grubość ramki", command=self._ustaw_grubosc).pack(fill="x", pady=2)
 
-        ttk.Separator(container).pack(fill="x", pady=10)
+        ttk.Separator(container).pack(fill="x", pady=6)
 
         # --- SEKCJA: MEDIA I TEKST ---
-        ttk.Label(container, text="ZAWARTOŚĆ", font=("Arial", 10, "bold")).pack(anchor="w")
+        ttk.Label(container, text="ZAWARTOŚĆ", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4,0))
         
+        ttk.Button(container, text="📋 Wklej Obraz ze Schowka", command=self._wklej_ze_schowka).pack(fill="x", pady=2)
         ttk.Button(container, text="Wstaw Obraz", command=self._wstaw_obraz).pack(fill="x", pady=2)
         ttk.Button(container, text="Stwórz Kolaż", command=self._wstaw_kolaz).pack(fill="x", pady=2)
         ttk.Button(container, text="Zmień Tekst", command=self._zmien_tekst).pack(fill="x", pady=2)
+        ttk.Button(container, text="🔲 Generuj Siatkę w tym Slocie...", command=self._generuj_siatke).pack(fill="x", pady=2)
+        ttk.Button(container, text="💾 Zapisz zawartość slotu jako JPG...", command=self._zapisz_jako_jpg).pack(fill="x", pady=2)
 
-        # --- STOPKA ---
-        footer = ttk.Frame(container)
-        footer.pack(side="bottom", fill="x", pady=10)
-        
-        ttk.Button(footer, text="ANULUJ", command=self._anuluj).pack(side="left", expand=True, padx=5)
-        ttk.Button(footer, text="ZATWIERDŹ", command=self._zatwierdz_i_zamknij).pack(side="left", expand=True, padx=5)
+        row_clear = ttk.Frame(container)
+        row_clear.pack(fill="x", pady=3)
+        ttk.Button(row_clear, text="🧹 Wyczyść Obraz", command=self._wyczysc_obraz).pack(side="left", expand=True, fill="x", padx=1)
+        ttk.Button(row_clear, text="🧹 Wyczyść Tekst", command=self._wyczysc_tekst).pack(side="left", expand=True, fill="x", padx=1)
+        ttk.Button(container, text="🧹 Wyczyść Cały Slot (Wszystko)", command=self._wyczysc_slot).pack(fill="x", pady=2)
+
+        ttk.Separator(container).pack(fill="x", pady=6)
+
+        # --- SEKCJA: SYMBOL I ROLA (ZADANIE SŁOWNE) ---
+        ttk.Label(container, text="ZADANIE SŁOWNE (SYMBOL / ROLA)", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4, 0))
+        ttk.Label(container, text="💡 Sloty o tym samym symbolu wyświetlają ten sam obraz!", font=("Arial", 8, "italic"), foreground="#555555").pack(anchor="w", pady=(1, 3))
+
+        sym_role_frame = ttk.Frame(container)
+        sym_role_frame.pack(fill="x", pady=4)
+
+        ttk.Label(sym_role_frame, text="Symbol:").grid(row=0, column=0, sticky="w", padx=2, pady=2)
+        self.entry_symbol = ttk.Entry(sym_role_frame, width=10)
+        self.entry_symbol.insert(0, str(self.sz.sloty[self.indeks].get("symbol", "") or ""))
+        self.entry_symbol.grid(row=0, column=1, sticky="w", padx=2, pady=2)
+
+        ttk.Label(sym_role_frame, text="Rola:").grid(row=1, column=0, sticky="w", padx=2, pady=2)
+        curr_role_raw = str(self.sz.sloty[self.indeks].get("role", "") or "")
+        curr_label = ROLE_VAL_TO_LABEL.get(curr_role_raw, curr_role_raw if curr_role_raw else "Brak / Zwykły slot")
+
+        self.combo_role = ttk.Combobox(
+            sym_role_frame,
+            values=[label for _, label in ROLE_OPTIONS],
+            state="readonly",
+            width=28
+        )
+        self.combo_role.set(curr_label)
+        self.combo_role.grid(row=1, column=1, sticky="w", padx=2, pady=2)
+
+        ttk.Button(sym_role_frame, text="🔄 Synchronizuj ten symbol teraz", command=self._sync_symbol).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 2))
+
+        def on_symbol_role_change(_=None):
+            sym_val = self.entry_symbol.get().strip().upper()
+            selected_label = self.combo_role.get().strip()
+            role_val = ROLE_LABEL_TO_VAL.get(selected_label, "")
+            if sym_val:
+                self.sz.sloty[self.indeks]["symbol"] = sym_val
+            elif "symbol" in self.sz.sloty[self.indeks]:
+                del self.sz.sloty[self.indeks]["symbol"]
+
+            if role_val:
+                self.sz.sloty[self.indeks]["role"] = role_val
+            elif "role" in self.sz.sloty[self.indeks]:
+                del self.sz.sloty[self.indeks]["role"]
+
+            self.sz.synchronizuj_symbole()
+            self._schedule_render()
+
+        self.entry_symbol.bind("<KeyRelease>", on_symbol_role_change)
+        self.combo_role.bind("<<ComboboxSelected>>", on_symbol_role_change)
+
+    def _generuj_siatke(self):
+        self.destroy()
+        if hasattr(self.parent, "generuj_siatke_w_slocie_dialog"):
+            self.parent.generuj_siatke_w_slocie_dialog(self.indeks)
+
+    def _sync_symbol(self):
+        c = self.sz.synchronizuj_symbole()
+        self.sz.prepare_render_data(force=True)
+        self.parent.render()
+        from tkinter import messagebox
+        messagebox.showinfo("Synchronizacja", f"Zsynchronizowano obraz w {c} slotach o tym samym symbolu.")
 
     def _zmien_tlo(self):
         from tkinter import colorchooser
@@ -194,12 +339,21 @@ class SlotEditorWindow(tk.Toplevel):
         #==========
 
     def _wstaw_obraz(self):
-        from gui.dialogs import with_dialog
-        @with_dialog(title="Obraz", fields=[("Nazwa pliku", "str")])
-        def logic(pw, s):
-            self.sz.wstaw_obrazek(self.indeks, s)
+        from gui.image_picker import ImagePickerDialog
+        curr_img = self.sz.sloty[self.indeks].get("image_path") or self.sz.sloty[self.indeks].get("image")
+        curr_source = self.sz.sloty[self.indeks].get("image_source", "obrazy")
+
+        def on_image_picked(filename, source):
+            self.sz.wstaw_obrazek(self.indeks, filename, image_source=source)
             self._schedule_render()
-        logic(self)
+
+        ImagePickerDialog(
+            self,
+            callback=on_image_picked,
+            initial_source=curr_source,
+            initial_file=curr_img if isinstance(curr_img, str) else "",
+            title=f"Wybierz obraz dla slotu #{self.indeks}"
+        )
     def _wstaw_kolaz(self):
         from gui.dialogs import with_dialog
         import random
@@ -252,14 +406,18 @@ class SlotEditorWindow(tk.Toplevel):
             self._schedule_render()
     
         logic(self)
-    
-#    def _wstaw_kolaz(self):
-#        from gui.dialogs import with_dialog
-#        @with_dialog(title="Kolaż", fields=[("Plik", "str"), ("Ilość", "int")])
-#        def logic(pw, s, n):
-#            self.sz.wklej_jeden_obraz_na_kolaz(self.indeks, s, n)
-#            self._schedule_render()
-#        logic(self)
+
+    def _wyczysc_obraz(self):
+        self.sz.wyczysc_obraz(self.indeks)
+        self._schedule_render()
+
+    def _wyczysc_tekst(self):
+        self.sz.wyczysc_tekst(self.indeks)
+        self._schedule_render()
+
+    def _wyczysc_slot(self):
+        self.sz.wyczysc_slot(self.indeks, co="wszystko")
+        self._schedule_render()
 
     def _usun_slot(self):
         self.sz.usun_slot(self.indeks)
@@ -278,6 +436,27 @@ class SlotEditorWindow(tk.Toplevel):
         self.sz.sloty[self.indeks]["coords"] = self.temp_coords
         self.parent.render()
         self.destroy()
+
+    def _wklej_ze_schowka(self):
+        from gui.main_window import pobierz_obraz_ze_schowka
+        img = pobierz_obraz_ze_schowka()
+        if not img:
+            from tkinter import messagebox
+            messagebox.showinfo("Schowek pusty", "W schowku nie znaleziono obrazu ani pliku graficznego.")
+            return
+        from paths import OBRAZY_DIR
+        import time
+        ts = int(time.time() * 1000) % 1000000
+        filename = f"wklejony_slot_{self.indeks}_{ts}.jpg"
+        img.save(OBRAZY_DIR / filename, "JPEG", quality=95)
+        self.sz.wstaw_obrazek(self.indeks, filename, image_source="obrazy")
+        self.parent.render()
+        from tkinter import messagebox
+        messagebox.showinfo("Wklejono", f"Wklejono obraz ze schowka do slotu #{self.indeks}.")
+
+    def _zapisz_jako_jpg(self):
+        from gui.dialogs import SaveSlotsDialog
+        SaveSlotsDialog(self, self.sz, slots=[self.indeks])
 
     def _anuluj(self):
         self.sz.sloty[self.indeks]["coords"] = self.base_coords
@@ -649,58 +828,160 @@ class AllSlotsEditorWindow(tk.Toplevel):
             self.header_text = f"EDYCJA HURTOWA ({len(self.sz.sloty)} slotów)"
 
         self.title(title if title else default_title)
-        self.geometry("450x700")
         self.transient(parent)
 
         self.sz.zapisz_undo()
         self._build_ui()
 
+        self.update_idletasks()
+        sw = self.winfo_screenwidth()
+        sh = self.winfo_screenheight()
+        w = 460
+        h = min(580, max(420, sh - 100))
+        x = max(0, (sw - w) // 2)
+        y = max(0, (sh - h) // 2)
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(380, 360)
+        self.resizable(True, True)
+
     def _build_ui(self):
-        container = ttk.Frame(self, padding=15)
-        container.pack(fill="both", expand=True)
+        # 1. Pinned footer na dole okna (przycisk ZAMKNIJ ZAWSZE widoczny)
+        footer = ttk.Frame(self, padding=(10, 8))
+        footer.pack(side="bottom", fill="x")
+        ttk.Button(footer, text="ZAMKNIJ", command=self.destroy).pack(side="left", expand=True, padx=5)
+
+        # 2. Główny kontener na całe okno (zawiera Canvas i Scrollbar)
+        main_container = ttk.Frame(self)
+        main_container.pack(side="top", fill="both", expand=True)
+
+        canvas = tk.Canvas(main_container, borderwidth=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(main_container, orient="vertical", command=canvas.yview)
+
+        container = ttk.Frame(canvas, padding=(12, 10))
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        canvas_window = canvas.create_window((0, 0), window=container, anchor="nw")
+
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(canvas_window, width=event.width)
+
+        container.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            if not canvas.winfo_exists():
+                return
+            if event.delta:
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
+
+        def _bind_mousewheel(e):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Button-4>", _on_mousewheel)
+            canvas.bind_all("<Button-5>", _on_mousewheel)
+
+        def _unbind_mousewheel(e):
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Button-4>")
+            canvas.unbind_all("<Button-5>")
+
+        self.bind("<Enter>", _bind_mousewheel)
+        self.bind("<Leave>", _unbind_mousewheel)
+        self.bind("<Destroy>", lambda e: _unbind_mousewheel(e) if e.widget == self else None)
 
         # NAGŁÓWEK
         ttk.Label(
-            container, 
-            text=self.header_text, 
+            container,
+            text=self.header_text,
             font=("Arial", 11, "bold")
-        ).pack(anchor="w", pady=(0, 10))
+        ).pack(anchor="w", pady=(0, 8))
 
         # --- SEKCJA: WYGLĄD ---
-        ttk.Label(container, text="WYGLĄD", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 0))
+        ttk.Label(container, text="WYGLĄD", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4, 0))
 
         col_frame = ttk.Frame(container)
-        col_frame.pack(fill="x", pady=5)
+        col_frame.pack(fill="x", pady=4)
 
         ttk.Button(col_frame, text="Kolor Tła", command=self._zmien_tlo).pack(side="left", expand=True, padx=2)
         ttk.Button(col_frame, text="Kolor Ramki", command=self._zmien_ramke).pack(side="left", expand=True, padx=2)
 
-        ttk.Label(container, text="Grubość ramki:").pack(anchor="w", pady=(5, 0))
+        ttk.Label(container, text="Grubość ramki:").pack(anchor="w", pady=(3, 0))
         self.out_width = ttk.Entry(container)
         first_idx = self.slots[0] if self.slots else 0
-        default_w = str(self.sz.sloty[first_idx].get("outline_width", 2)) if (0 <= first_idx < len(self.sz.sloty)) else "2"
+        default_w = str(self.sz.sloty[first_idx].get("outline_width", 2)) if (
+                    0 <= first_idx < len(self.sz.sloty)) else "2"
         self.out_width.insert(0, default_w)
         self.out_width.pack(fill="x", pady=2)
 
         ttk.Button(container, text="Ustaw grubość ramki", command=self._ustaw_grubosc).pack(fill="x", pady=2)
 
-        ttk.Separator(container).pack(fill="x", pady=15)
+        ttk.Separator(container).pack(fill="x", pady=6)
 
         # --- SEKCJA: MEDIA I TEKST ---
-        ttk.Label(container, text="ZAWARTOŚĆ", font=("Arial", 10, "bold")).pack(anchor="w", pady=(5, 0))
+        ttk.Label(container, text="ZAWARTOŚĆ", font=("Arial", 10, "bold")).pack(anchor="w", pady=(4, 0))
 
-        ttk.Button(container, text="Wstaw Obraz", command=self._wstaw_obraz).pack(fill="x", pady=3)
-        ttk.Button(container, text="Stwórz Kolaż", command=self._wstaw_kolaz).pack(fill="x", pady=3)
-        ttk.Button(container, text="Zmień Tekst", command=self._zmien_tekst).pack(fill="x", pady=3)
-        ttk.Button(container, text="Losuj liczby bez powtórzeń", command=self._losuj_liczby).pack(fill="x", pady=3)
+        ttk.Button(container, text="📋 Wklej Obraz ze Schowka do Zaznaczonych", command=self._wklej_ze_schowka).pack(
+            fill="x", pady=2)
+        ttk.Button(container, text="Wstaw Obraz", command=self._wstaw_obraz).pack(fill="x", pady=2)
+        ttk.Button(container, text="Stwórz Kolaż", command=self._wstaw_kolaz).pack(fill="x", pady=2)
+        ttk.Button(container, text="Zmień Tekst", command=self._zmien_tekst).pack(fill="x", pady=2)
+        ttk.Button(container, text="Losuj liczby bez powtórzeń", command=self._losuj_liczby).pack(fill="x", pady=2)
+        ttk.Button(container, text="🎲 Losuj unikalne obrazy (obrazy stałe)", command=self._losuj_obrazy_stale).pack(fill="x", pady=2)
+        ttk.Button(container, text="🔄 Synchronizuj zawartość wg symboli", command=self._synchronizuj_symbole).pack(fill="x", pady=2)
+        ttk.Button(container, text="💾 Zapisz zawartość slotów jako JPG...", command=self._zapisz_jako_jpg).pack(
+            fill="x", pady=2)
 
-        ttk.Separator(container).pack(fill="x", pady=15)
+        row_clear = ttk.Frame(container)
+        row_clear.pack(fill="x", pady=3)
+        ttk.Button(row_clear, text="🧹 Wyczyść Obraz", command=self._wyczysc_obraz).pack(side="left", expand=True,
+                                                                                        fill="x", padx=1)
+        ttk.Button(row_clear, text="🧹 Wyczyść Tekst", command=self._wyczysc_tekst).pack(side="left", expand=True,
+                                                                                        fill="x", padx=1)
+        ttk.Button(container, text="🧹 Wyczyść Zawartość Slotów", command=self._wyczysc_slot).pack(fill="x", pady=2)
 
-        # --- STOPKA ---
-        footer = ttk.Frame(container)
-        footer.pack(side="bottom", fill="x", pady=10)
+        # --- SEKCJA: ROLA (DLA ZAZNACZONYCH) ---
+        ttk.Separator(container).pack(fill="x", pady=6)
+        ttk.Label(container, text="ZADANIE SŁOWNE (ROLA DLA ZAZNACZONYCH)", font=("Arial", 10, "bold")).pack(anchor="w",
+                                                                                                             pady=(4,
+                                                                                                                   0))
 
-        ttk.Button(footer, text="ZAMKNIJ", command=self.destroy).pack(side="left", expand=True, padx=5)
+        role_frame = ttk.Frame(container)
+        role_frame.pack(fill="x", pady=4)
+        ttk.Label(role_frame, text="Rola:").pack(side="left", padx=(0, 5))
+
+        self.combo_role_all = ttk.Combobox(
+            role_frame,
+            values=[label for _, label in ROLE_OPTIONS],
+            state="readonly",
+            width=28
+        )
+        first_role = str(self.sz.sloty[self.slots[0]].get("role", "") or "") if self.slots else ""
+        self.combo_role_all.set(ROLE_VAL_TO_LABEL.get(first_role, "Brak / Zwykły slot"))
+        self.combo_role_all.pack(side="left", fill="x", expand=True)
+
+        def on_all_role_change(_=None):
+            selected_label = self.combo_role_all.get().strip()
+            role_val = ROLE_LABEL_TO_VAL.get(selected_label, "")
+            self.sz.zapisz_undo()
+            for idx in self.slots:
+                if 0 <= idx < len(self.sz.sloty):
+                    if role_val:
+                        self.sz.sloty[idx]["role"] = role_val
+                    elif "role" in self.sz.sloty[idx]:
+                        del self.sz.sloty[idx]["role"]
+            self.parent.render()
+
+        self.combo_role_all.bind("<<ComboboxSelected>>", on_all_role_change)
 
     def _zmien_tlo(self):
         kolor = colorchooser.askcolor()[1]
@@ -723,12 +1004,22 @@ class AllSlotsEditorWindow(tk.Toplevel):
             pass
 
     def _wstaw_obraz(self):
-        from gui.dialogs import with_dialog
-        @with_dialog(title="Wstaw obraz", fields=[("Nazwa pliku", "str")])
-        def logic(pw, s):
-            self.sz.wstaw_obrazek(sciezka=s, slots=self.slots)
+        from gui.image_picker import ImagePickerDialog
+        first_idx = self.slots[0] if self.slots else 0
+        curr_img = (self.sz.sloty[first_idx].get("image_path") or self.sz.sloty[first_idx].get("image")) if (0 <= first_idx < len(self.sz.sloty)) else ""
+        curr_source = self.sz.sloty[first_idx].get("image_source", "obrazy") if (0 <= first_idx < len(self.sz.sloty)) else "obrazy"
+
+        def on_image_picked(filename, source):
+            self.sz.wstaw_obrazek(slots=self.slots, sciezka=filename, image_source=source)
             self.parent.render()
-        logic(self)
+
+        ImagePickerDialog(
+            self,
+            callback=on_image_picked,
+            initial_source=curr_source,
+            initial_file=curr_img if isinstance(curr_img, str) else "",
+            title=f"Wybierz obraz ({len(self.slots)} slotów)"
+        )
 
     def _wstaw_kolaz(self):
         from gui.dialogs import with_dialog
@@ -795,6 +1086,56 @@ class AllSlotsEditorWindow(tk.Toplevel):
 
     def _losuj_liczby(self):
         open_random_numbers_dialog(self, self.sz, slots=self.slots)
+
+    def _wyczysc_obraz(self):
+        self.sz.wyczysc_obraz(slots=self.slots)
+        self.parent.render()
+
+    def _wyczysc_tekst(self):
+        self.sz.wyczysc_tekst(slots=self.slots)
+        self.parent.render()
+
+    def _wyczysc_slot(self):
+        self.sz.wyczysc_slot(slots=self.slots, co="wszystko")
+        self.parent.render()
+
+    def _wklej_ze_schowka(self):
+        from gui.main_window import pobierz_obraz_ze_schowka
+        img = pobierz_obraz_ze_schowka()
+        if not img:
+            from tkinter import messagebox
+            messagebox.showinfo("Schowek pusty", "W schowku nie znaleziono obrazu ani pliku graficznego.")
+            return
+        from paths import OBRAZY_DIR
+        import time
+        ts = int(time.time() * 1000) % 1000000
+        filename = f"wklejony_{ts}.jpg"
+        img.save(OBRAZY_DIR / filename, "JPEG", quality=95)
+        self.sz.wstaw_obrazek(slots=self.slots, sciezka=filename, image_source="obrazy")
+        self.parent.render()
+        from tkinter import messagebox
+        messagebox.showinfo("Wklejono", f"Wklejono obraz ze schowka do {len(self.slots)} slotów.")
+
+    def _zapisz_jako_jpg(self):
+        from gui.dialogs import SaveSlotsDialog
+        SaveSlotsDialog(self, self.sz, slots=self.slots)
+
+    def _losuj_obrazy_stale(self):
+        try:
+            assigned = self.sz.losuj_obrazy_stale(slots=self.slots, unikalne=True)
+            self.parent.render()
+            from tkinter import messagebox
+            messagebox.showinfo("Wylosowano obrazy", f"Przypisano unikalne obrazy ze stałych do {len(assigned)} slotów.\nPowiązane sloty o tych samych symbolach zostały zaktualizowane.")
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Błąd", str(e))
+
+    def _synchronizuj_symbole(self):
+        c = self.sz.synchronizuj_symbole()
+        self.sz.prepare_render_data(force=True)
+        self.parent.render()
+        from tkinter import messagebox
+        messagebox.showinfo("Synchronizacja", f"Zsynchronizowano obrazy w {c} slotach o pasujących symbolach.")
 
 
 GroupSlotsEditorWindow = AllSlotsEditorWindow

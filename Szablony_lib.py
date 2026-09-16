@@ -3,9 +3,10 @@ import os
 import copy
 import gc
 import random
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from paths import PROJEKTY_DIR, OBRAZY_DIR, WYNIKI_DIR, TEKSTY_DIR, DO_DRUKU_DIR
+from paths import PROJEKTY_DIR, OBRAZY_DIR, OBRAZY_STALE_DIR, WYNIKI_DIR, TEKSTY_DIR, DO_DRUKU_DIR
 
 gc.disable()
 # operacje
@@ -31,6 +32,9 @@ class Szablony:
         # Dane projektu
         self.nazwa_projektu = "Nowy"
         self.kolor_tla = "white"
+        self.obraz_tla = None
+        self.obraz_tla_source = "obrazy"
+        self.word_task = None
 
         # Cache obrazów: sciezka -> (Image, mtime)
         self.cache_obrazow = {}
@@ -59,7 +63,10 @@ class Szablony:
         self.szerokosc = szerokosc
         self.wysokosc = wysokosc
         self.kolor_tla = kolor_tla
+        self.obraz_tla = None
+        self.obraz_tla_source = "obrazy"
         self.sloty = []
+        self.word_task = None
         
         self.prepare_render_data(force=True)
         self.render_all()
@@ -78,6 +85,9 @@ class Szablony:
         self.szerokosc = dane["szerokosc"]
         self.wysokosc = dane["wysokosc"]
         self.sloty = dane["sloty"]
+        self.word_task = dane.get("word_task", None)
+        self.obraz_tla = dane.get("obraz_tla", None)
+        self.obraz_tla_source = dane.get("obraz_tla_source", "obrazy")
 
         # Odbudowa CACHE obrazów (fizyczne pliki) - to zostaje w self (global cache)
         # Ale cache renderowania (_render_cache) budujemy od zera
@@ -88,24 +98,30 @@ class Szablony:
     # =====================================================
     # CACHE OBRAZÓW
     # =====================================================
-    def _zaladuj_obraz_z_cache(self, sciezka):
+    def _zaladuj_obraz_z_cache(self, sciezka, source="obrazy"):
         """Ładuje obraz z cache lub z dysku jeśli zmieniony."""
         from paths import napraw_sciezke
 
-        pelna_sciezka = napraw_sciezke(sciezka, "img")
+        pelna_sciezka = napraw_sciezke(sciezka, "img", source=source)
+        cache_key = (str(sciezka), source)
         
         try:
             mtime = os.path.getmtime(pelna_sciezka)
         except Exception:
             mtime = 0 
 
-        if sciezka in self.cache_obrazow:
+        if cache_key in self.cache_obrazow:
+            img, zapisany_mtime = self.cache_obrazow[cache_key]
+            if zapisany_mtime == mtime:
+                return img
+        elif sciezka in self.cache_obrazow:
             img, zapisany_mtime = self.cache_obrazow[sciezka]
             if zapisany_mtime == mtime:
                 return img
 
         try:
             img = Image.open(pelna_sciezka).convert("RGB")
+            self.cache_obrazow[cache_key] = (img, mtime)
             self.cache_obrazow[sciezka] = (img, mtime)
             return img
         except Exception as e:
@@ -121,7 +137,17 @@ class Szablony:
             self._compute_slot(i)
         self._compute_unique_numbers()
         self._compute_auto_images()
+        self.synchronizuj_symbole()
         self._compute_letters()
+        self._compute_word_task()
+
+    def _compute_word_task(self):
+        if hasattr(self, "word_task") and self.word_task and self.word_task.get("active", True):
+            try:
+                from word_task import WordTask
+                WordTask.apply_to_szablony(self)
+            except Exception as e:
+                print(f"[Szablony] Błąd przy _compute_word_task: {e}")
 
     def _compute_unique_numbers(self):
         groups = {}
@@ -417,7 +443,11 @@ class Szablony:
             self.compute()
             self._apply_auto_images()
             self._apply_letters_layout()
+        elif hasattr(self, "word_task") and self.word_task and self.word_task.get("active", True):
+            self._compute_word_task()
             
+        self.synchronizuj_symbole()
+
         # 1. Rozwiązywanie zależności liczbowych (iteracyjnie)
         max_iter = len(self.sloty) + 2
         iteracja = 0
@@ -628,7 +658,8 @@ class Szablony:
                             # Wyliczamy offset wewnątrz komórki (centrowanie)
                             # Tutaj musimy znać proporcje obrazka, żeby go wycentrować.
                             # To wymaga załadowania obrazka w prepare? TAK.
-                            img_obj = self._zaladuj_obraz_z_cache(base_path)
+                            img_src = k.get("image_source", "obrazy")
+                            img_obj = self._zaladuj_obraz_z_cache(base_path, source=img_src)
                             iw, ih = img_obj.size
                             
                             # Skalowanie "contain" wewnątrz max_w/max_h
@@ -641,6 +672,7 @@ class Szablony:
                             
                             layout_items.append({
                                 "path": base_path,
+                                "source": img_src,
                                 "rel_x": final_x, # Względem lewego górnego rogu slotu
                                 "rel_y": final_y,
                                 "w": fw,
@@ -678,14 +710,113 @@ class Szablony:
         h = int(self.wysokosc * skala)
 
         self.img = Image.new("RGB", (w, h), self.kolor_tla)
+        
+        # Renderowanie tła obrazkowego jeśli istnieje (z zachowaniem proporcji aspect ratio)
+        if self.obraz_tla:
+            bg_img = None
+            if isinstance(self.obraz_tla, Image.Image):
+                bg_img = self.obraz_tla
+            elif isinstance(self.obraz_tla, (str, Path)):
+                bg_src = getattr(self, "obraz_tla_source", "obrazy")
+                bg_img = self._zaladuj_obraz_z_cache(self.obraz_tla, source=bg_src)
+            
+            if bg_img and bg_img.width > 0 and bg_img.height > 0:
+                # Skalowanie proporcjonalne (contain) - nigdy nie zniekształca obrazu
+                scale_factor = min(w / bg_img.width, h / bg_img.height)
+                fw = max(1, int(round(bg_img.width * scale_factor)))
+                fh = max(1, int(round(bg_img.height * scale_factor)))
+
+                # Jeśli wymiary różnią się od płótna jedynie o błąd zaokrąglenia (<= 2 px),
+                # dopasowujemy dokładnie do pełnego rozmiaru płótna (w, h), aby obraz wypełnił 100% płótna
+                if abs(fw - w) <= 2 and abs(fh - h) <= 2:
+                    fw, fh = w, h
+                
+                if bg_img.size != (fw, fh):
+                    bg_img_scaled = bg_img.resize((fw, fh), Image.LANCZOS)
+                else:
+                    bg_img_scaled = bg_img
+                
+                # Wyśrodkowanie na kanwie
+                pos_x = (w - fw) // 2
+                pos_y = (h - fh) // 2
+                self.img.paste(bg_img_scaled.convert("RGB"), (pos_x, pos_y))
+
         self.draw = ImageDraw.Draw(self.img)
 
-        for i in range(len(self.sloty)):
+        # Rysujemy najpierw większe sloty (rodzice/tła), a mniejsze (dzieci/wewnętrzne) na wierzchu
+        def _slot_render_order(idx):
+            c = self.sloty[idx].get("coords", [0, 0, 0, 0])
+            area = max(0, c[2] - c[0]) * max(0, c[3] - c[1])
+            return (-area, idx)
+
+        for i in sorted(range(len(self.sloty)), key=_slot_render_order):
             self._renderuj_pojedynczy_slot(i, skala)
             
         draw_lines = any(s.get("letters_layout", {}).get("draw_lines", False) for s in self.sloty)
         if draw_lines:
             self._render_lines_v2(self.draw, skala)
+
+    def ustaw_obraz_tla(self, obraz_lub_sciezka, dopasuj_rozmiar=True, image_source="obrazy", max_width=None, max_height=None):
+        """
+        Ustawia obraz tła dla całego projektu (ze schowka lub pliku).
+        Dostosowuje wymiary płótna tak, aby wklejany obraz był wielkości płótna:
+        - jeśli obraz ma inny stosunek wymiarów niż dotychczasowe płótno, płótno
+          i obraz są tak manipulowane, by stosunek wymiarów obrazu nie uległ zmianie,
+          obraz wypełniał całe płótno (bez pustych pasów) i był w całości widoczny.
+        - jeśli obraz jest większy od płótna lub monitora/widoku, zostaje przeskalowany
+          wraz z płótnem w dół, aby w 100% mieścił się na ekranie.
+        """
+        self.zapisz_undo()
+        if isinstance(obraz_lub_sciezka, Image.Image):
+            self.obraz_tla = obraz_lub_sciezka.convert("RGB")
+            self.obraz_tla_source = image_source
+            img_w, img_h = obraz_lub_sciezka.width, obraz_lub_sciezka.height
+        else:
+            self.obraz_tla = str(obraz_lub_sciezka)
+            self.obraz_tla_source = image_source
+            bg = self._zaladuj_obraz_z_cache(self.obraz_tla, source=image_source)
+            img_w, img_h = bg.size if bg else (800, 600)
+            
+        old_w = self.szerokosc if self.szerokosc > 0 else img_w
+        old_h = self.wysokosc if self.wysokosc > 0 else img_h
+
+        if dopasuj_rozmiar and img_w > 0 and img_h > 0:
+            # Jeśli jawnie podano max_width i max_height, skalujemy w dół
+            if max_width is not None and max_height is not None:
+                box_w = max(200, int(max_width))
+                box_h = max(200, int(max_height))
+                scale = min(box_w / img_w, box_h / img_h)
+                new_w = max(100, int(round(img_w * scale)))
+                new_h = max(100, int(round(img_h * scale)))
+            else:
+                # Domyślnie pełna, oryginalna rozdzielczość obrazu bez utraty jakości
+                new_w = img_w
+                new_h = img_h
+
+            # Jeśli wymiary kanwy się zmieniają i istnieją już sloty, przeskaluj ich współrzędne
+            if self.sloty and (old_w != new_w or old_h != new_h):
+                sx = new_w / old_w
+                sy = new_h / old_h
+                for s in self.sloty:
+                    c = s.get("coords", [0, 0, 100, 100])
+                    s["coords"] = [
+                        int(round(c[0] * sx)),
+                        int(round(c[1] * sy)),
+                        int(round(c[2] * sx)),
+                        int(round(c[3] * sy))
+                    ]
+
+            self.szerokosc = new_w
+            self.wysokosc = new_h
+
+        self.prepare_render_data(force=True)
+        self.render_all()
+
+    def wyczysc_obraz_tla(self):
+        """Usuwa obraz tła projektu."""
+        self.zapisz_undo()
+        self.obraz_tla = None
+        self.render_all()
 
     def _render_lines(self, skala=1.0):
         gorne = [i for i, s in enumerate(self.sloty) if s.get("group") == "gora" and s.get("visible", True)]
@@ -747,9 +878,10 @@ class Szablony:
                 max_w = max(1, cell_w - margin_x)
                 max_h = max(1, cell_h - margin_y)
                 base_path = k.get("sciezka", "")
+                img_source = k.get("image_source", "obrazy")
                 
                 try:
-                    img_obj = self._zaladuj_obraz_z_cache(base_path)
+                    img_obj = self._zaladuj_obraz_z_cache(base_path, source=img_source)
                     iw, ih = img_obj.size
                     
                     scale_factor = min(max_w / max(1, iw), max_h / max(1, ih))
@@ -770,10 +902,11 @@ class Szablony:
                 except:
                     pass
                     
-        elif computed.get("image_path"):
-             path = self._resolve_image_path(computed["image_path"])
+        elif not self.is_text_or_answer_role(s) and computed.get("image_path"):
+             img_source = computed.get("image_source", s.get("image_source", "obrazy"))
+             path = self._resolve_image_path(computed["image_path"], source=img_source)
              if os.path.exists(path):
-                 orig = Image.open(path).convert("RGB")
+                 orig = self._zaladuj_obraz_z_cache(computed["image_path"], source=img_source)
                  orig_w, orig_h = orig.size
                  scale_factor = min(slot_w / max(1, orig_w), slot_h / max(1, orig_h))
                  fw = int(orig_w * scale_factor)
@@ -784,11 +917,12 @@ class Szablony:
                      orig_resized = orig.resize((fw, fh), Image.LANCZOS)
                      self.img.paste(orig_resized, (ix, iy))
                      
-        elif s.get("image_path") and not s.get("kolaz"):
-             # Pojedynczy obraz stary kod
-             path = self._resolve_image_path(s["image_path"])
+        elif not self.is_text_or_answer_role(s) and s.get("image_path") and not s.get("kolaz"):
+             # Pojedynczy obraz
+             img_source = s.get("image_source", "obrazy")
+             path = self._resolve_image_path(s["image_path"], source=img_source)
              if os.path.exists(path):
-                 orig = Image.open(path).convert("RGB")
+                 orig = self._zaladuj_obraz_z_cache(s["image_path"], source=img_source)
                  
                  orig_w, orig_h = orig.size
                  scale_factor = min(slot_w / max(1, orig_w), slot_h / max(1, orig_h))
@@ -889,9 +1023,9 @@ class Szablony:
         self.draw.text((text_x, text_y), txt, fill="black", anchor=pil_anchor, font=font)
 
 
-    def _resolve_image_path(self, sciezka):
+    def _resolve_image_path(self, sciezka, source="obrazy"):
         from paths import napraw_sciezke
-        return napraw_sciezke(sciezka, "img")
+        return napraw_sciezke(sciezka, "img", source=source)
 
     def _resolve_text_path(self, sciezka):
         from paths import napraw_sciezke
@@ -943,6 +1077,17 @@ class Szablony:
         for i in target_slots:
             s = self.sloty[i]
             s["kolaz"] = copy.deepcopy(kolaz_cfg)
+            s.pop("image_path", None)
+            s.pop("image_source", None)
+            s.pop("tekst", None)
+            s.pop("text", None)
+            s.pop("letters", None)
+            s.pop("auto_images", None)
+            if i in self._computed:
+                self._computed[i].pop("text", None)
+                self._computed[i].pop("value", None)
+                self._computed[i].pop("letter", None)
+                self._computed[i].pop("image_path", None)
             if i in self._render_cache:
                 del self._render_cache[i]
             self._compute_slot(i)
@@ -955,6 +1100,9 @@ class Szablony:
             "szerokosc": self.szerokosc,
             "wysokosc": self.wysokosc,
             "sloty": copy.deepcopy(self.sloty),
+            "word_task": copy.deepcopy(self.word_task) if hasattr(self, 'word_task') else None,
+            "obraz_tla": copy.deepcopy(self.obraz_tla) if isinstance(self.obraz_tla, Image.Image) else self.obraz_tla,
+            "obraz_tla_source": getattr(self, "obraz_tla_source", "obrazy"),
             "_render_cache": copy.deepcopy(self._render_cache), # Zapisujemy stan wizualny
             "_computed": copy.deepcopy(self._computed) if hasattr(self, '_computed') else {}
         }
@@ -979,6 +1127,9 @@ class Szablony:
         self.szerokosc = stan["szerokosc"]
         self.wysokosc = stan["wysokosc"]
         self.sloty = stan["sloty"]
+        self.word_task = copy.deepcopy(stan.get("word_task", None))
+        self.obraz_tla = stan.get("obraz_tla", None)
+        self.obraz_tla_source = stan.get("obraz_tla_source", "obrazy")
         self._render_cache = stan.get("_render_cache", {})
         self._computed = stan.get("_computed", {})
         
@@ -992,6 +1143,9 @@ class Szablony:
         self.szerokosc = stan["szerokosc"]
         self.wysokosc = stan["wysokosc"]
         self.sloty = stan["sloty"]
+        self.word_task = copy.deepcopy(stan.get("word_task", None))
+        self.obraz_tla = stan.get("obraz_tla", None)
+        self.obraz_tla_source = stan.get("obraz_tla_source", "obrazy")
         self._render_cache = stan.get("_render_cache", {})
         self._computed = stan.get("_computed", {})
         
@@ -1085,6 +1239,303 @@ class Szablony:
         self.prepare_render_data(force=True)
         self.render_all()
 
+    def generuj_siatke_w_slocie(
+        self,
+        indeks_slotu,
+        kolumny,
+        wiersze,
+        margines=(5, 5),
+        zachowaj_nadrzedny=True,
+        auto_symbole=False,
+        symbol_prefix="",
+        role=None
+    ):
+        """
+        Generuje podsiatkę slotów wewnątrz wybranego slotu bazowego.
+        - indeks_slotu: indeks slotu nadrzędnego.
+        - kolumny, wiersze: liczba kolumn i wierszy podsiatki.
+        - margines: marginesy procentowe (poziomy, pionowy).
+        - zachowaj_nadrzedny: czy zachować slot nadrzędny (np. jako ramkę/tło), czy go zastąpić.
+        - auto_symbole: jeśli True/"letters", nadaje symbole A, B, C...; jeśli "numbers" nadaje 1, 2, 3...
+        - symbol_prefix: prefiks doklejany do symbolu (np. "S" -> S1, S2...).
+        - role: opcjonalna rola przypisana do nowych slotów.
+        Zwraca listę indeksów nowo utworzonych slotów.
+        """
+        if not (0 <= indeks_slotu < len(self.sloty)):
+            raise IndexError(f"Nieprawidłowy indeks slotu: {indeks_slotu}")
+        if kolumny < 1 or wiersze < 1:
+            raise ValueError("Liczba kolumn i wierszy musi wynosić co najmniej 1.")
+
+        self.zapisz_undo()
+        parent_slot = self.sloty[indeks_slotu]
+        bx1, by1, bx2, by2 = parent_slot["coords"]
+        parent_w = bx2 - bx1
+        parent_h = by2 - by1
+
+        if parent_w <= 0 or parent_h <= 0:
+            raise ValueError("Slot bazowy ma nieprawidłowe (zerowe lub ujemne) wymiary.")
+
+        sz_k = parent_w / kolumny
+        w_k = parent_h / wiersze
+        m_x = sz_k * margines[0] * 0.01
+        m_y = w_k * margines[1] * 0.01
+
+        nowe_sloty = []
+        symbol_counter = 0
+
+        for w in range(wiersze):
+            for k in range(kolumny):
+                cx1 = int(bx1 + k * sz_k + m_x)
+                cy1 = int(by1 + w * w_k + m_y)
+                cx2 = int(bx1 + (k + 1) * sz_k - m_x)
+                cy2 = int(by1 + (w + 1) * w_k - m_y)
+
+                if cx2 <= cx1:
+                    cx2 = cx1 + 1
+                if cy2 <= cy1:
+                    cy2 = cy1 + 1
+
+                ns = {
+                    "coords": [cx1, cy1, cx2, cy2],
+                    "fill": None,
+                    "outline": "black",
+                    "outline_width": 2,
+                    "image_path": None,
+                    "image_source": "obrazy",
+                    "tekst": None,
+                    "visible": True,
+                    "parent_slot": indeks_slotu if zachowaj_nadrzedny else None
+                }
+
+                if auto_symbole:
+                    symbol_counter += 1
+                    if auto_symbole in ("letters", True):
+                        letter = chr(65 + ((symbol_counter - 1) % 26))
+                        ns["symbol"] = f"{symbol_prefix}{letter}"
+                    else:
+                        ns["symbol"] = f"{symbol_prefix}{symbol_counter}"
+
+                if role:
+                    ns["role"] = role
+
+                nowe_sloty.append(ns)
+
+        if zachowaj_nadrzedny:
+            start_idx = len(self.sloty)
+            self.sloty.extend(nowe_sloty)
+            new_indices = list(range(start_idx, len(self.sloty)))
+        else:
+            self.sloty.pop(indeks_slotu)
+            for idx, ns in enumerate(nowe_sloty):
+                self.sloty.insert(indeks_slotu + idx, ns)
+            new_indices = list(range(indeks_slotu, indeks_slotu + len(nowe_sloty)))
+
+        self.prepare_render_data(force=True)
+        self.render_all()
+        return new_indices
+
+    def losuj_obrazy_stale(self, slots=None, repeat=1, unikalne=True):
+        """
+        Przypisuje losowe obrazy z folderu 'data/obrazy_stałe' do podanych slotów.
+        Po przypisaniu automatycznie synchronizuje sloty o pasujących symbolach.
+        """
+        from paths import OBRAZY_STALE_DIR
+        if not OBRAZY_STALE_DIR.is_dir():
+            raise FileNotFoundError(f"Katalog 'obrazy_stałe' nie istnieje: {OBRAZY_STALE_DIR}")
+
+        pliki = [p.name for p in OBRAZY_STALE_DIR.glob("*.*") if p.suffix.lower() in [".jpg", ".png", ".jpeg", ".bmp", ".webp"]]
+        if not pliki:
+            raise FileNotFoundError("Brak plików graficznych w katalogu 'obrazy_stałe'.")
+
+        self.zapisz_undo()
+
+        target_slots = list(slots) if slots is not None else list(range(len(self.sloty)))
+        target_slots = [i for i in target_slots if 0 <= i < len(self.sloty)]
+        if not target_slots:
+            return {}
+
+        pula = list(pliki)
+        random.shuffle(pula)
+
+        assigned = {}
+        for idx in target_slots:
+            if not pula:
+                pula = list(pliki)
+                random.shuffle(pula)
+            chosen = pula.pop(0) if unikalne else random.choice(pliki)
+            self.sloty[idx]["image_path"] = chosen
+            self.sloty[idx]["image_source"] = "obrazy_stale"
+            self.sloty[idx]["visible"] = True
+            assigned[idx] = chosen
+            if idx in self._render_cache:
+                del self._render_cache[idx]
+            if not hasattr(self, "_computed"):
+                self._computed = {}
+            if idx not in self._computed:
+                self._computed[idx] = {}
+            self._computed[idx]["image_path"] = chosen
+            self._computed[idx]["image_source"] = "obrazy_stale"
+
+        # Synchronizuj powiązane symbole
+        self.synchronizuj_symbole()
+        self.prepare_render_data(force=True)
+        self.render_all()
+        return assigned
+
+    @staticmethod
+    def is_text_or_answer_role(role_or_slot):
+        """
+        Sprawdza, czy rola lub slot reprezentuje pole tekstowe (literę w legendzie)
+        lub pole na odpowiedź ucznia w zadaniu słownym.
+        Takie sloty NIE MOGĄ zawierać obrazków i nie biorą udziału w synchronizacji obrazów.
+        """
+        if isinstance(role_or_slot, dict):
+            role = role_or_slot.get("role") or role_or_slot.get("task_role") or role_or_slot.get("group") or ""
+        else:
+            role = role_or_slot or ""
+        role_str = str(role).strip().lower()
+        no_image_roles = {
+            "legend_letter",
+            "mapping_letter",
+            "legend_letters",
+            "letters",
+            "gora_litera",
+            "litera_legendy",
+            "litera w legendzie (tekst)",
+            "answer_slot",
+            "answer_slots",
+            "answer",
+            "answers",
+            "odpowiedz",
+            "odpowiedzi",
+            "pole_odpowiedzi",
+            "pole na odpowiedź (dla ucznia)"
+        }
+        return role_str in no_image_roles
+
+    def synchronizuj_symbole(self):
+        """
+        Synchronizuje obrazy pomiędzy slotami, które współdzielą ten sam 'symbol'.
+        Zasada:
+        1. Jeśli w grupie slotów o tym samym 'symbol' co najmniej jeden slot ma przypisany obraz ('image_path'),
+           obraz ten (wraz z 'image_source') zostaje automatycznie powielony do pozostałych slotów
+           o tym samym symbolu.
+        2. Priorytet źródła: slot o roli 'legend_symbol', a w następnej kolejności slot o najniższym indeksie z obrazkiem.
+        3. Sloty o rolach liter (np. 'legend_letter') i odpowiedzi (np. 'answer_slot') NIE przyjmują obrazków
+           i ich ewentualny obrazek zostaje wyczyszczony.
+        4. Zwykłe, pojedyncze sloty użytkownika (bez ról lub o rolach symboli) synchronizują obrazy bez zmian.
+        Zwraca liczbę zaktualizowanych slotów.
+        """
+        # Upewniamy się, że sloty na litery i odpowiedzi nie mają przypisanych obrazów
+        for i, s in enumerate(self.sloty):
+            if self.is_text_or_answer_role(s):
+                if s.get("image_path") is not None or "image_source" in s:
+                    s["image_path"] = None
+                    s.pop("image_source", None)
+                    if i in self._render_cache:
+                        del self._render_cache[i]
+                    if hasattr(self, "_computed") and i in self._computed:
+                        self._computed[i].pop("image_path", None)
+                        self._computed[i].pop("image_source", None)
+
+        symbol_groups = {}
+        for i, s in enumerate(self.sloty):
+            # Ignorujemy sloty na litery i odpowiedzi przy grupowaniu do synchronizacji obrazów
+            if self.is_text_or_answer_role(s):
+                continue
+            sym = s.get("symbol")
+            if sym is not None and str(sym).strip():
+                sym_str = str(sym).strip().upper()
+                symbol_groups.setdefault(sym_str, []).append(i)
+
+        updated_count = 0
+        for sym_str, indices in symbol_groups.items():
+            if len(indices) <= 1:
+                continue
+
+            # Znajdź slot źródłowy
+            src_slot_idx = None
+            # 1. Priorytet: slot o roli 'legend_symbol' z obrazkiem
+            for idx in indices:
+                s = self.sloty[idx]
+                if s.get("role") in ("legend_symbol", "symbol_legendy") and s.get("image_path"):
+                    src_slot_idx = idx
+                    break
+
+            # 2. Jeśli nie znaleziono, weź pierwszy slot z obrazkiem
+            if src_slot_idx is None:
+                for idx in indices:
+                    s = self.sloty[idx]
+                    if s.get("image_path"):
+                        src_slot_idx = idx
+                        break
+
+            if src_slot_idx is not None:
+                src_slot = self.sloty[src_slot_idx]
+                src_img = src_slot.get("image_path")
+                src_src = src_slot.get("image_source", "obrazy_stale" if src_slot.get("role") == "legend_symbol" else "obrazy")
+
+                for idx in indices:
+                    if idx == src_slot_idx:
+                        continue
+                    s = self.sloty[idx]
+                    if s.get("image_path") != src_img or s.get("image_source") != src_src:
+                        s["image_path"] = src_img
+                        s["image_source"] = src_src
+                        if idx in self._render_cache:
+                            del self._render_cache[idx]
+                        if not hasattr(self, "_computed"):
+                            self._computed = {}
+                        if idx not in self._computed:
+                            self._computed[idx] = {}
+                        self._computed[idx]["image_path"] = src_img
+                        self._computed[idx]["image_source"] = src_src
+                        updated_count += 1
+
+        return updated_count
+
+    def dodaj_slot(
+        self,
+        coords,
+        fill=None,
+        outline="black",
+        outline_width=2,
+        image_path=None,
+        image_source="obrazy",
+        tekst=None,
+        symbol=None,
+        role=None,
+        task_index=None,
+        parent_slot=None
+    ):
+        """Dodaje pojedynczy nowy slot z zapamiętaniem undo."""
+        self.zapisz_undo()
+        nowy_slot = {
+            "coords": list(coords),
+            "fill": fill,
+            "outline": outline,
+            "outline_width": outline_width,
+            "image_path": image_path,
+            "image_source": image_source,
+            "tekst": tekst,
+            "visible": True
+        }
+        if symbol is not None:
+            nowy_slot["symbol"] = symbol
+        if role is not None:
+            nowy_slot["role"] = role
+        if task_index is not None:
+            nowy_slot["task_index"] = task_index
+        if parent_slot is not None:
+            nowy_slot["parent_slot"] = parent_slot
+
+        self.sloty.append(nowy_slot)
+        new_idx = len(self.sloty) - 1
+        if new_idx in self._render_cache:
+            del self._render_cache[new_idx]
+        self._compute_slot(new_idx)
+        return new_idx
+
     def edytuj_slot(self, indeks=None, slots=None, **kwargs):
         """Edytuje właściwości jednego lub wielu slotów."""
         if slots is not None:
@@ -1155,7 +1606,15 @@ class Szablony:
 
         self.zapisz_undo()
         for i in target_slots:
-            self.sloty[i]["tekst"] = copy.deepcopy(tekst_dane)
+            s = self.sloty[i]
+            s["tekst"] = copy.deepcopy(tekst_dane)
+            s.pop("kolaz", None)
+            s.pop("image_path", None)
+            s.pop("image_source", None)
+            s.pop("auto_images", None)
+            if i in self._computed:
+                self._computed[i].pop("image_path", None)
+                self._computed[i].pop("kolaz_count", None)
             if i in self._render_cache:
                 del self._render_cache[i]
             self._compute_slot(i)
@@ -1191,6 +1650,13 @@ class Szablony:
                 "range": f"{min_val}-{max_val}",
                 "align": current_align
             }
+            s.pop("kolaz", None)
+            s.pop("image_path", None)
+            s.pop("image_source", None)
+            s.pop("auto_images", None)
+            if idx in self._computed:
+                self._computed[idx].pop("image_path", None)
+                self._computed[idx].pop("kolaz_count", None)
             if idx in self._render_cache:
                 del self._render_cache[idx]
 
@@ -1231,28 +1697,35 @@ class Szablony:
                 
         return sukcesy, bledy
 
-    def renderuj_pojedynczy_do_druku(self, nazwa_projektu):
-        """Renderuje wybrany projekt w wysokiej jakości do folderu DO_DRUKU."""
+    def renderuj_pojedynczy_do_druku(self, nazwa_projektu=None):
+        """Renderuje wybrany (lub bieżący) projekt w wysokiej jakości do folderu DO_DRUKU."""
+        target_name = nazwa_projektu or self.nazwa_projektu
+        if not target_name:
+            raise Exception("Nie podano nazwy projektu do renderowania.")
+
         temp = Szablony()
-        if not temp.otworz_projekt(nazwa_projektu):
-            raise Exception("Nie znaleziono projektu")
-            
+        if not temp.otworz_projekt(target_name):
+            raise Exception(f"Nie znaleziono projektu '{target_name}'")
+
+        temp._in_print_render = True
         temp.prepare_render_data(force=True)
-        scale = 4.0 
+        scale = 3.0 
         temp.render_all(skala=scale)
         
         if temp.img:
-             sciezka = DO_DRUKU_DIR / f"{nazwa_projektu}_print.jpg"
-             temp.img.convert("RGB").save(sciezka, quality=100, dpi=(300, 300))
-             return str(sciezka)
+            sciezka = DO_DRUKU_DIR / f"{target_name}_print.jpg"
+            temp.img.convert("RGB").save(sciezka, quality=100, dpi=(300, 300))
+            return str(sciezka)
         else:
-             raise Exception("Błąd renderowania (pusty obraz)")
+            raise Exception("Błąd renderowania (pusty obraz)")
 
     # =====================================================
     # OBRAZY
     # =====================================================
-    def wstaw_obrazek(self, indeks=None, sciezka=None, slots=None):
+    def wstaw_obrazek(self, indeks=None, sciezka=None, slots=None, image_source="obrazy", symbol=None, role=None, source=None):
         """Wstawia obraz do slotu lub grupy slotów bez przycinania (tryb contain)."""
+        if source is not None:
+            image_source = source
         if slots is not None:
             target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
         elif indeks is not None:
@@ -1267,17 +1740,88 @@ class Szablony:
         for i in target_slots:
             s = self.sloty[i]
             s["image_path"] = sciezka
-            if "kolaz" in s:
-                del s["kolaz"]
+            if image_source:
+                s["image_source"] = image_source
+            if symbol is not None:
+                s["symbol"] = symbol
+            if role is not None:
+                s["role"] = role
+            s.pop("kolaz", None)
+            s.pop("tekst", None)
+            s.pop("text", None)
+            s.pop("letters", None)
+            s.pop("auto_images", None)
+            if i in self._computed:
+                self._computed[i].pop("text", None)
+                self._computed[i].pop("value", None)
+                self._computed[i].pop("letter", None)
             if i in self._render_cache:
                 del self._render_cache[i]
             self._compute_slot(i)
 
-    def wstaw_obrazek_wszystkim(self, sciezka, slots=None):
+    def wyczysc_slot(self, indeks=None, slots=None, co="wszystko"):
+        """
+        Czyści zawartość slotu lub grupy slotów.
+        co: "wszystko" | "obraz" | "tekst" | "tlo" | "ramka"
+        """
+        if slots is not None:
+            target_slots = [i for i in slots if 0 <= i < len(self.sloty)]
+        elif indeks is not None:
+            target_slots = [indeks] if 0 <= indeks < len(self.sloty) else []
+        else:
+            target_slots = []
+
+        if not target_slots:
+            return
+
+        self.zapisz_undo()
+        for i in target_slots:
+            s = self.sloty[i]
+            if co in ("wszystko", "obraz"):
+                s.pop("image_path", None)
+                s.pop("image_source", None)
+                s.pop("kolaz", None)
+                s.pop("auto_images", None)
+                if i in self._computed:
+                    self._computed[i].pop("image_path", None)
+                    self._computed[i].pop("kolaz_count", None)
+
+            if co in ("wszystko", "tekst"):
+                s.pop("tekst", None)
+                s.pop("text", None)
+                s.pop("letters", None)
+                if i in self._computed:
+                    self._computed[i].pop("text", None)
+                    self._computed[i].pop("value", None)
+                    self._computed[i].pop("letter", None)
+
+            if co in ("wszystko", "tlo"):
+                s["fill"] = None
+
+            if co == "ramka":
+                s["outline"] = None
+
+            if co == "wszystko":
+                s.pop("symbol", None)
+                s.pop("role", None)
+
+            if i in self._render_cache:
+                del self._render_cache[i]
+            self._compute_slot(i)
+
+    def wyczysc_obraz(self, indeks=None, slots=None):
+        """Czyści obraz / kolaż z wybranego slotu lub grupy slotów."""
+        self.wyczysc_slot(indeks=indeks, slots=slots, co="obraz")
+
+    def wyczysc_tekst(self, indeks=None, slots=None):
+        """Czyści tekst / liczby z wybranego slotu lub grupy slotów."""
+        self.wyczysc_slot(indeks=indeks, slots=slots, co="tekst")
+
+    def wstaw_obrazek_wszystkim(self, sciezka, slots=None, image_source="obrazy", symbol=None, role=None):
         """Wstawia ten sam obraz do wszystkich (lub wybranych) slotów."""
         if slots is None:
             slots = range(len(self.sloty))
-        self.wstaw_obrazek(sciezka=sciezka, slots=slots)
+        self.wstaw_obrazek(sciezka=sciezka, slots=slots, image_source=image_source, symbol=symbol, role=role)
 
     def wklej_kolaz_wszystkim(
         self,
@@ -1286,7 +1830,8 @@ class Szablony:
         random_cfg=None,
         source_slot=None,
         margines_proc=10,
-        slots=None
+        slots=None,
+        image_source="obrazy"
     ):
         """Ustawia kolaż dla wszystkich (lub wybranych) slotów naraz."""
         if slots is None:
@@ -1299,6 +1844,10 @@ class Szablony:
             margines_proc=margines_proc,
             slots=slots
         )
+        if image_source != "obrazy":
+            for i in [s for s in slots if 0 <= s < len(self.sloty)]:
+                if "kolaz" in self.sloty[i]:
+                    self.sloty[i]["kolaz"]["image_source"] = image_source
 
     def wstaw_wiele_obrazkow(self, lista_sciezek, lista_indeksow):
         """Wstawia wiele obrazów i renderuje raz."""
@@ -1380,10 +1929,6 @@ class Szablony:
         wynik.render_all()
         return wynik
 
-    # =====================================================
-    # ZAPIS
-    # =====================================================
-
     def zapisz(self):
         sloty_json = []
 
@@ -1401,17 +1946,132 @@ class Szablony:
         if self.img:
             self.img.convert("RGB").save(img_path, "JPEG", quality=95)
 
+        projekt_dict = {
+            "nazwa": self.nazwa_projektu,
+            "szerokosc": self.szerokosc,
+            "wysokosc": self.wysokosc,
+            "sloty": sloty_json
+        }
+        if hasattr(self, "word_task") and self.word_task:
+            projekt_dict["word_task"] = self.word_task
+
+        if self.obraz_tla is not None:
+            if isinstance(self.obraz_tla, Image.Image):
+                bg_name = f"{self.nazwa_projektu}_tlo.jpg"
+                bg_path = OBRAZY_DIR / bg_name
+                self.obraz_tla.save(bg_path, "JPEG", quality=98, subsampling=0)
+                projekt_dict["obraz_tla"] = bg_name
+                projekt_dict["obraz_tla_source"] = "obrazy"
+            else:
+                projekt_dict["obraz_tla"] = str(self.obraz_tla)
+                projekt_dict["obraz_tla_source"] = getattr(self, "obraz_tla_source", "obrazy")
+
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(
-                {
-                    "nazwa": self.nazwa_projektu,
-                    "szerokosc": self.szerokosc,
-                    "wysokosc": self.wysokosc,
-                    "sloty": sloty_json
-                },
+                projekt_dict,
                 f,
                 indent=4,
                 ensure_ascii=False
             )
+
+    def zapisz_zawartosc_slotow(
+        self,
+        slots=None,
+        docelowy_folder="obrazy",
+        nazwy=None,
+        start_index=0,
+        bez_ramek=True
+    ):
+        """
+        Wycina zawartość wskazanych slotów i zapisuje do formatu JPG w podanym folderze.
+        docelowy_folder: "obrazy" (data/obrazy) lub "obrazy_stale" / "obrazy_stałe" (data/obrazy_stałe) lub obiekt Path.
+        nazwy: dla pojedynczego slotu (str) - podana nazwa pliku (np. 'moj_obraz'),
+               dla wielu (list) - lista nazw,
+               None - automatyczna numeracja start_index.jpg, start_index+1.jpg...
+        bez_ramek: czy wyrenderować czystą zawartość bez rysowania obramowania slotów.
+        """
+        from pathlib import Path
+        if isinstance(docelowy_folder, Path):
+            target_dir = docelowy_folder
+        elif str(docelowy_folder) in ("obrazy_stale", "obrazy_stałe", "stale"):
+            target_dir = OBRAZY_STALE_DIR
+        else:
+            target_dir = OBRAZY_DIR
+        
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        if slots is None:
+            target_indices = list(range(len(self.sloty)))
+        elif isinstance(slots, (int, float)):
+            target_indices = [int(slots)]
+        else:
+            target_indices = [int(i) for i in slots if 0 <= int(i) < len(self.sloty)]
+
+        if not target_indices:
+            return []
+
+        # Jeśli bez ramek, zrenderujmy tymczasowo bez outlines
+        old_outlines = []
+        if bez_ramek:
+            for s in self.sloty:
+                old_outlines.append(s.get("outline"))
+                s["outline"] = None
+        
+        try:
+            self.render_all(skala=1.0)
+            full_img = self.img.copy() if self.img else None
+        finally:
+            if bez_ramek:
+                for s, old_out in zip(self.sloty, old_outlines):
+                    s["outline"] = old_out
+                self.render_all(skala=1.0)
+
+        if not full_img:
+            return []
+
+        img_w, img_h = full_img.size
+        zapisane_sciezki = []
+
+        is_single = len(target_indices) == 1
+
+        for i, idx in enumerate(target_indices):
+            s = self.sloty[idx]
+            coords = s.get("coords", [0, 0, 100, 100])
+            
+            x1 = max(0, min(coords[0], coords[2], img_w))
+            y1 = max(0, min(coords[1], coords[3], img_h))
+            x2 = max(0, min(max(coords[0], coords[2]), img_w))
+            y2 = max(0, min(max(coords[1], coords[3]), img_h))
+
+            if x2 <= x1 or y2 <= y1:
+                crop_img = Image.new("RGB", (max(1, x2 - x1), max(1, y2 - y1)), "white")
+            else:
+                crop_img = full_img.crop((x1, y1, x2, y2))
+
+            if crop_img.mode != "RGB":
+                crop_img = crop_img.convert("RGB")
+
+            # Ustalenie nazwy pliku
+            if is_single and isinstance(nazwy, str) and nazwy.strip():
+                base_name = nazwy.strip()
+                if base_name.lower().endswith(".jpg") or base_name.lower().endswith(".jpeg"):
+                    filename = base_name
+                else:
+                    filename = f"{base_name}.jpg"
+            elif isinstance(nazwy, (list, tuple)) and i < len(nazwy) and nazwy[i]:
+                base_name = str(nazwy[i]).strip()
+                if base_name.lower().endswith(".jpg") or base_name.lower().endswith(".jpeg"):
+                    filename = base_name
+                else:
+                    filename = f"{base_name}.jpg"
+            else:
+                num = start_index + i
+                filename = f"{num}.jpg"
+
+            out_path = target_dir / filename
+            crop_img.save(out_path, "JPEG", quality=95)
+            zapisane_sciezki.append(out_path)
+
+        return zapisane_sciezki
 
 gc.enable()
